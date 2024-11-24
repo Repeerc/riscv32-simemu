@@ -1,0 +1,3 @@
+[submodule "firmware/opensbi"]
+	path = firmware/opensbi
+	url = https://github.com/Repeerc/opensbi
