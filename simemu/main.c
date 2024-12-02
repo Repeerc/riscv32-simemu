@@ -23,15 +23,12 @@
 #include <sys/time.h>
 #include <unistd.h>
 #include <signal.h>
+#include "simemu.h"
 
-#define likely(x) __builtin_expect(!!(x), 1)
-#define unlikely(x) __builtin_expect(!!(x), 0)
+#define SDL_MAIN_HANDLED
+#include <SDL.h>
 
-#define MULTI_THREAD (0)
-#define ENABLE_RV32C (0)
-#define ENABLE_TLB (1)
-#define COLLECT_TLB_STATUS (0)
-
+#include <stdatomic.h>
 #if (MULTI_THREAD)
 #include <pthread.h>
 #endif
@@ -157,22 +154,6 @@ enum csr_index
     IDX_CSR_NUMS,
 };
 
-#define EXC_OK                   (-1)
-#define EXC_INST_MISALIGNED        0
-#define EXC_INST_ACCESS            1
-#define EXC_INST_ILLEGAL           2
-#define EXC_BREAKPOINT             3
-#define EXC_LOAD_MISALIGNED        4
-#define EXC_LOAD_ACCESS            5
-#define EXC_STORE_MISALIGNED       6
-#define EXC_STORE_ACCESS           7
-#define EXC_SYSCALL                8
-#define EXC_SUPERVISOR_SYSCALL     9
-#define EXC_HYPERVISOR_SYSCALL    10
-#define EXC_M_MODE_SYSCALL        11
-#define EXC_INST_PAGE_FAULT       12
-#define EXC_LOAD_PAGE_FAULT       13
-#define EXC_STORE_PAGE_FAULT      15
 
 // Status register flags
 #define SR_SIE       0x00000002 // Supervisor Interrupt Enable
@@ -232,9 +213,6 @@ typedef struct pte_t
     unsigned int PPN_1:12;
 }pte_t;
 
-#define READ  0b001
-#define WRITE 0b010
-#define EXEC  0b100
 
 enum reg_abi_name
 {
@@ -256,54 +234,6 @@ char *reg_abi_str[] =
     "T3","T4","T5","T6"
 };
 
-#if defined(__x86_64__) || defined(__i386__)
-#define chk_not_aligned(adr,v) 0
-#else
-#define chk_not_aligned(adr,v) (adr)%(v)
-#endif
-
-#define fetch_m(base, off, len, dst) \
-{ \
-    switch (len) \
-    { \
-        case 1:((uint8_t *)dst)[0] = *((uint8_t *)(&base[off]));break;  \
-        case 2:if (unlikely(chk_not_aligned(off,2))){                             \
-            ((uint8_t *)dst)[0] = *((uint8_t *)(&base[off]));           \
-            ((uint8_t *)dst)[1] = *((uint8_t *)(&base[off+1]));         \
-            break;                                                      \
-        }else{*((uint16_t *)dst) = *((uint16_t *)(&base[off]));break;}  \
-        case 4:if (unlikely(chk_not_aligned(off,4))){                     \
-            ((uint8_t *)dst)[0] = *((uint8_t *)(&base[off]));   \
-            ((uint8_t *)dst)[1] = *((uint8_t *)(&base[off+1])); \
-            ((uint8_t *)dst)[2] = *((uint8_t *)(&base[off+2])); \
-            ((uint8_t *)dst)[3] = *((uint8_t *)(&base[off+3])); \
-            break;                                              \
-        }else{*((uint32_t *)dst) = *((uint32_t *)(&base[off]));break;} \
-        default: {printf("invaild fetch size %d\n", len);return EXC_LOAD_ACCESS;} \
-    } \
-}
-
-#define store_m(base, off, len, val) \
-{ \
-    switch (len) \
-    { \
-        case 1:*((uint8_t *)(&base[off])) = ((uint8_t *)val)[0]; break; \
-        case 2:if (unlikely(chk_not_aligned(off,2))){                             \
-            *((uint8_t *)(&base[off])) = ((uint8_t *)val)[0];           \
-            *((uint8_t *)(&base[off+1])) = ((uint8_t *)val)[1];         \
-        }else{*((uint16_t *)(&base[off])) = *((uint16_t *)val);break;}  \
-        case 4:if (unlikely(chk_not_aligned(off,4))){                             \
-            *((uint8_t *)(&base[off])) = ((uint8_t *)val)[0];           \
-            *((uint8_t *)(&base[off+1])) = ((uint8_t *)val)[1];         \
-            *((uint8_t *)(&base[off+2])) = ((uint8_t *)val)[2];         \
-            *((uint8_t *)(&base[off+3])) = ((uint8_t *)val)[3];         \
-        break;                                                          \
-        }else{                                                          \
-            *((uint32_t *)(&base[off])) = *((uint32_t *)val);\
-        break;} \
-        default: {printf("invaild store size %d\n", len);return EXC_STORE_ACCESS;} \
-    } \
-}
 
 #define COPY_MSTATUS_TO_SSTATUS \
     cpu->CSR[IDX_CSR_SSTATUS] &= ~(SR_SIE); \
@@ -342,24 +272,7 @@ cpu->CSR[IDX_CSR_MI##x] &= ~MIP_SEIP; \
 cpu->CSR[IDX_CSR_MI##x] |= (cpu->CSR[IDX_CSR_SI##x] & MIP_SEIP);
 
 
-#define MEM_BASE               0x80000000
-#define MEM_SIZE               1048576 * 256 
-
-#define UART8250_BASE          0x10000000
-
-#define CLINT_BASE             0x20000000
-#define CLINT_IPI_OFF          0
-#define CLINT_TIMER_CMP_OFF    0x4000
-#define CLINT_TIMER_VAL_OFF    0xbff8
-#define CLINT_TIMER_VALH_OFF   (CLINT_TIMER_VAL_OFF + 4)
-
-#define PLIC_BASE              0x30000000
-#define PLIC_PRIORITY_BASE     0x0
-#define PLIC_PENDING_BASE      0x1000
-#define PLIC_ENABLE_BASE       0x2000
-#define PLIC_ENABLE_STRIDE     0x80
-#define PLIC_CONTEXT_BASE      0x200000
-#define PLIC_CONTEXT_STRIDE    0x1000
+#include "virtio.h"
 
 #define UART_IER            1       // Out: Interrupt Enable Register
 #define UART_IER_THRI       0x02    // Enable Transmitter holding register int.
@@ -377,15 +290,13 @@ cpu->CSR[IDX_CSR_MI##x] |= (cpu->CSR[IDX_CSR_SI##x] & MIP_SEIP);
 
 uint8_t UART8250_IER = 0;   // Interrupt Enable
 uint8_t UART8250_IIR = UART_IIR_NO_INT;   // Interrupt identification
-uint8_t UART8250_LSR = 0; 
+uint8_t UART8250_LSR = (UART_LSR_TEMT | UART_LSR_THRE);
 
-#define UART_IRQ_NUM    (10)
 int uart_in_buf_wr_p = 0;
 int uart_in_buf_rd_p = 0;
 char uart_in_buf[64];
 
 // int mem_lock = 0;
-uint64_t mem_addr_lock = -1ULL;
 
 // clang-format on
 typedef struct inst_decode_t
@@ -406,6 +317,7 @@ typedef struct permit_bit_t
 
 typedef struct tlb_t
 {
+    // pte_t *pte;
     uint32_t vaddr;
     uint32_t paddr;
     uint16_t asid;
@@ -424,9 +336,6 @@ typedef struct tlb_t
 
 #endif
 
-#define NR_CPU 2
-#define NR_IRQ_CONTEXT_PER_CPU 2
-#define NR_IRQ (16 + 1)
 typedef struct cpu_core_t
 {
     uint32_t REGS[32];
@@ -453,13 +362,16 @@ typedef struct cpu_core_t
     uint64_t tlb_hit;
     uint64_t tlb_miss;
 #endif
+
+    uint64_t lock_wait_st;
+    uint64_t lock_wait_amo_st;
+
 #endif
 
     uint16_t SATP_asid;
 
     int wfi;
     int running;
-    int stall;
     int chk_irq;
 
     uint32_t step_init;
@@ -468,20 +380,20 @@ typedef struct cpu_core_t
     uint32_t exti_context_enable[NR_IRQ_CONTEXT_PER_CPU]; // MEXTI, SEXTI, irq0~31
     uint32_t exti_context_piorid[NR_IRQ_CONTEXT_PER_CPU];
     uint32_t exti_context_pending_irq[NR_IRQ_CONTEXT_PER_CPU];
-} cpu_core_t;
 
-typedef struct extirq_def_t
-{
-    int pending;
-    int priority;
-    void (*do_cmplt)(void);
-} extirq_def_t;
+    uint64_t debug_cycs;
+    uint64_t debug_t0;
+
+} cpu_core_t;
 
 extirq_def_t extirq_slot[NR_IRQ];
 cpu_core_t cpu_core[NR_CPU];
 
-uint8_t *mem;
-uint32_t load_resv_addr[NR_CPU];
+uint8_t *main_mem;
+uint8_t sbi_fw_mem[1048576];
+uint8_t fdt_fw_mem[1048576];
+uint8_t *framebuffer;
+volatile uint32_t load_resv_addr[NR_CPU];
 
 #if MULTI_THREAD
 pthread_mutex_t amo_mutex;
@@ -489,6 +401,21 @@ pthread_mutex_t mem_mutex;
 #endif
 
 volatile uint64_t usec_time_start = 0;
+
+uint64_t now_microsecond_timestamp()
+{
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return tv.tv_sec * 1000000LL + tv.tv_usec;
+}
+
+uint64_t get_microsecond_timestamp()
+{
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return tv.tv_sec * 1000000LL + tv.tv_usec;
+    // return now_microsecond_timestamp() - usec_time_start;
+}
 
 void debug_dump_regs(cpu_core_t *cpu)
 {
@@ -500,25 +427,15 @@ void debug_dump_regs(cpu_core_t *cpu)
     }
     printf("PC=%08x,  %lld\n", cpu->PC, cpu->cycles);
     printf("MODE=%08x\n", cpu->MODE);
-    printf("Running,wfi,stall=%d,%d,%d\n", cpu->running, cpu->wfi, cpu->stall);
+    printf("Running,wfi,stall=%d,%d,%d\n", cpu->running, cpu->wfi, 0);
     printf("MIE,SIE=%d,%d\n", cpu->CSR[IDX_CSR_MSTATUS] & SR_MIE, cpu->CSR[IDX_CSR_SSTATUS] & SR_SIE);
     printf("MIE,MIP=%08x,%08x\n", cpu->CSR[IDX_CSR_MIE], cpu->CSR[IDX_CSR_MIP]);
     printf("SIE,SIP=%08x,%08x\n", cpu->CSR[IDX_CSR_SIE], cpu->CSR[IDX_CSR_SIP]);
-}
 
-uint64_t now_microsecond_timestamp()
-{
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    return tv.tv_sec * 1000000LL + tv.tv_usec;
-}
-
-uint64_t get_microsecond_timestamp()
-{
-    // struct timeval tv;
-    // gettimeofday(&tv, NULL);
-    // return tv.tv_sec * 1000000LL + tv.tv_usec;
-    return now_microsecond_timestamp() - usec_time_start;
+    uint64_t t = get_microsecond_timestamp();
+    printf("MIPS:%.3f\n", (double)(cpu->cycles - cpu->debug_cycs) / (t - cpu->debug_t0));
+    cpu->debug_t0 = t;
+    cpu->debug_cycs = cpu->cycles;
 }
 
 void uart_send_char(char c)
@@ -530,12 +447,12 @@ void uart_send_char(char c)
 
     // if (uart_in_buf_rd_p != uart_in_buf_wr_p)
     {
-        if (!(extirq_slot[UART_IRQ_NUM].pending))
+        if (!(extirq_slot[IRQ_NUM_UART].pending))
             if (UART8250_IER & UART_IER_RDI)
             {
                 UART8250_IIR |= UART_IIR_RDI;
                 UART8250_IIR &= ~UART_IIR_NO_INT;
-                extirq_slot[UART_IRQ_NUM].pending = 1;
+                extirq_slot[IRQ_NUM_UART].pending = 1;
             }
         // UART8250_LSR |= UART_LSR_DR;
     }
@@ -544,7 +461,35 @@ void uart_send_char(char c)
 int mem_access_dispatch(cpu_core_t *cpu, uint32_t addr, uint32_t len, void *dat, uint32_t rd)
 {
 
-    if ((addr & 0xF0000000) == MEM_BASE)
+    switch (addr & 0xF0000000)
+    {
+    case 0:
+    {
+
+        if ((addr & 0x0F000000) == SBI_BASE)
+        {
+            uint32_t off = addr - SBI_BASE;
+            if (off <= sizeof(sbi_fw_mem))
+            {
+                if (rd & READ)
+                    fetch_m(sbi_fw_mem, off, len, dat) else store_m(sbi_fw_mem, off, len, dat)
+
+                        return EXC_OK;
+            }
+        }
+        else if ((addr & 0x0F000000) == DTB_BASE)
+        {
+            uint32_t off = addr - DTB_BASE;
+            if (off <= sizeof(fdt_fw_mem))
+            {
+                fetch_m(fdt_fw_mem, off, len, dat);
+                return EXC_OK;
+            }
+        }
+    }
+    break;
+    case (MEM_BASE2):
+    case (MEM_BASE):
     {
         uint32_t off = addr - MEM_BASE;
 
@@ -552,31 +497,44 @@ int mem_access_dispatch(cpu_core_t *cpu, uint32_t addr, uint32_t len, void *dat,
         {
             // while (mem_lock)
             //     ;
-            if (rd & READ)
+            if (rd & (WRITE))
             {
-                fetch_m(mem, off, len, dat);
+                store_m(main_mem, off, len, dat);
             }
             else
             {
-                store_m(mem, off, len, dat);
+                fetch_m(main_mem, off, len, dat);
+            }
 
-                // #if (MULTI_THREAD)
-                //                 pthread_mutex_lock(&amo_mutex);
-                // #endif
-                for (int i = 0; i < NR_CPU; i++)
-                    if (load_resv_addr[i] == (addr / 4))
-                        load_resv_addr[i] = -1;
+            return EXC_OK;
+        }
+        break;
+    }
 
-                // #if (MULTI_THREAD)
-                //                 pthread_mutex_unlock(&amo_mutex);
-                // #endif
+    case VIRTIO_BASE1:
+    {
+        uint32_t off = addr - VIRTIO_BASE1;
+        return virtio_input_mmio_access(off, len, rd, dat);
+    }
+
+    case (VRAM_BASE):
+    {
+        uint32_t off = addr - VRAM_BASE;
+        if (off < VRAM_SIZE)
+        {
+            if (rd & WRITE)
+            {
+                store_m(framebuffer, off, len, dat);
+            }
+            else
+            {
+                fetch_m(framebuffer, off, len, dat);
             }
             return EXC_OK;
         }
     }
 
-    switch (addr & 0xF0000000)
-    {
+    break;
 
     case (UART8250_BASE):
     {
@@ -652,6 +610,10 @@ int mem_access_dispatch(cpu_core_t *cpu, uint32_t addr, uint32_t len, void *dat,
                     else if (claim_cmplt)
                     {
                         *((uint32_t *)dat) = cpu_core[cpu_idx].exti_context_pending_irq[context_idx];
+                        if (extirq_slot[*((uint32_t *)dat)].pending)
+                        {
+                            extirq_slot[*((uint32_t *)dat)].pending--;
+                        }
                     }
                 }
                 else
@@ -662,15 +624,15 @@ int mem_access_dispatch(cpu_core_t *cpu, uint32_t addr, uint32_t len, void *dat,
                     {
                         if (*((uint32_t *)dat) < NR_IRQ)
                         {
-                            if (extirq_slot[*((uint32_t *)dat)].pending)
+                            // if (extirq_slot[*((uint32_t *)dat)].pending)
+                            // {
+                            //     extirq_slot[*((uint32_t *)dat)].pending--;
+                            if (extirq_slot[*((uint32_t *)dat)].do_cmplt)
                             {
-                                extirq_slot[*((uint32_t *)dat)].pending--;
-                                if (extirq_slot[*((uint32_t *)dat)].do_cmplt)
-                                {
-                                    extirq_slot[*((uint32_t *)dat)].do_cmplt();
-                                }
-                                // printf("irq:%d,rem:%d\n",*((uint32_t *)dat),extirq_slot[*((uint32_t *)dat)].pending  );
+                                extirq_slot[*((uint32_t *)dat)].do_cmplt();
                             }
+                            //     // printf("irq:%d,rem:%d\n",*((uint32_t *)dat),extirq_slot[*((uint32_t *)dat)].pending  );
+                            // }
                         }
                         cpu_core[cpu_idx].exti_context_pending_irq[context_idx] = 0;
                         if (context_idx == 0)
@@ -763,7 +725,10 @@ int mem_access_dispatch(cpu_core_t *cpu, uint32_t addr, uint32_t len, void *dat,
                 {
                     cpu_core[idx].CLINT_IPI = *((uint32_t *)dat);
                     if (cpu_core[idx].CLINT_IPI)
+                    {
                         cpu_core[idx].CSR[IDX_CSR_MIP] |= MIP_MSIP;
+                        cpu_core[idx].chk_irq = 1;
+                    }
                     else
                         cpu_core[idx].CSR[IDX_CSR_MIP] &= ~MIP_MSIP;
                 }
@@ -830,9 +795,12 @@ void trap(cpu_core_t *cpu, int interrupt, int reason, uint32_t exception_pc, uin
         DELEG = ((1 << reason) & cpu->CSR[IDX_CSR_MIDELEG]);
     else
         DELEG = ((1 << reason) & cpu->CSR[IDX_CSR_MEDELEG]);
-
+    // for (int i = 0; i < NR_CPU; i++)
+    load_resv_addr[cpu->id] = -1UL;
     if (DELEG)
     {
+        if (interrupt && !(cpu->CSR[IDX_CSR_SSTATUS] & SR_SIE))
+            return;
         cpu->CSR[IDX_CSR_SSTATUS] &= ~SR_SPIE;
         cpu->CSR[IDX_CSR_SSTATUS] |= (cpu->CSR[IDX_CSR_SSTATUS] & SR_SIE) ? SR_SPIE : 0;
         cpu->CSR[IDX_CSR_SSTATUS] &= ~SR_SIE;
@@ -847,15 +815,17 @@ void trap(cpu_core_t *cpu, int interrupt, int reason, uint32_t exception_pc, uin
         cpu->MODE = S_MODE;
         cpu->PC = cpu->CSR[IDX_CSR_STVEC];
 
-        COPY_SSTATUS_TO_MSTATUS;
-        COPY_SIx_TO_MIx(P);
-        COPY_SIx_TO_MIx(E);
+        // COPY_SSTATUS_TO_MSTATUS;
+        // COPY_SIx_TO_MIx(P);
+        // COPY_SIx_TO_MIx(E);
 
         if (cpu->PC & 0b10)
             printf("VTEC OFFSET!\n");
     }
     else
     {
+        if (interrupt && (!(cpu->CSR[IDX_CSR_MSTATUS] & SR_MIE)))
+            return;
         cpu->CSR[IDX_CSR_MSTATUS] &= ~SR_MPIE;
         cpu->CSR[IDX_CSR_MSTATUS] |= (cpu->CSR[IDX_CSR_MSTATUS] & SR_MIE) ? SR_MPIE : 0;
         cpu->CSR[IDX_CSR_MSTATUS] &= ~SR_MIE;
@@ -885,7 +855,7 @@ void debug_dump_mmap(cpu_core_t *cpu)
     {
         uint32_t pg_dir_paddr = (cpu->CSR[IDX_CSR_SATP] & 0x3FFFFF) << 12;
         printf("pg_dir_paddr:%08x\n", pg_dir_paddr);
-        pte_t *l1_pte = ((pte_t *)&mem[pg_dir_paddr - MEM_BASE]);
+        pte_t *l1_pte = ((pte_t *)&main_mem[pg_dir_paddr - MEM_BASE]);
         uint32_t l1_ppn = 0;
         uint32_t l2_ppn = 0;
 
@@ -895,7 +865,7 @@ void debug_dump_mmap(cpu_core_t *cpu)
 
         for (int i = 0; i < 1024; i++)
         {
-            if ((uptr_t)&l1_pte[i] < (uptr_t)&mem[MEM_SIZE])
+            if ((uptr_t)&l1_pte[i] < (uptr_t)&main_mem[MEM_SIZE])
             {
                 if (l1_pte[i].V)
                 {
@@ -910,13 +880,13 @@ void debug_dump_mmap(cpu_core_t *cpu)
                     }
                     else
                     {
-                        pte_t *l2_pte = ((pte_t *)&mem[l1_ppn - MEM_BASE]);
+                        pte_t *l2_pte = ((pte_t *)&main_mem[l1_ppn - MEM_BASE]);
                         int track = 0;
 
                         for (int j = 0; j < 1024; j++)
                         {
 
-                            if ((uptr_t)&l2_pte[j] < (uptr_t)&mem[MEM_SIZE])
+                            if ((uptr_t)&l2_pte[j] < (uptr_t)&main_mem[MEM_SIZE])
                             {
                                 if (l2_pte[j].V)
                                 {
@@ -990,6 +960,7 @@ int mem_addr_translate(cpu_core_t *cpu, uint32_t vaddr, uint32_t *paddr, uint32_
     }
 
 #if ENABLE_TLB
+    // int supperpage = 0;
 
     if ((vaddr & (~0xFFF)) == (cpu->last_access_vaddr & (~0xFFF)))
     {
@@ -1018,6 +989,10 @@ int mem_addr_translate(cpu_core_t *cpu, uint32_t vaddr, uint32_t *paddr, uint32_
         translate_sucess = 1;
         cpu->last_access_vaddr = vaddr & (~0xFFF);
         cpu->last_access_paddr = *paddr & (~0xFFF);
+        // if (rd & (READ | EXEC))
+        //     cpu->tlbs[asid_idx][tlb_idx].pte->A = 1;
+        // if (rd & (WRITE))
+        //     cpu->tlbs[asid_idx][tlb_idx].pte->D = 1;
         return EXC_OK;
     }
     else
@@ -1031,12 +1006,12 @@ int mem_addr_translate(cpu_core_t *cpu, uint32_t vaddr, uint32_t *paddr, uint32_
         uint32_t vpn_1 = (vaddr >> 22) & 0x3FF;
         uint32_t vpn_0 = (vaddr >> 12) & 0x3FF;
         uint32_t offset = vaddr & 0xFFF;
-        l1_pte_paddr = pg_dir_paddr + vpn_1 * 4;
+        l1_pte_paddr = pg_dir_paddr | (vpn_1 << 2);
         pte_t l1_pte;
         pte_t l2_pte;
         if ((l1_pte_paddr >= MEM_BASE) && (l1_pte_paddr < MEM_BASE + MEM_SIZE))
         {
-            l1_pte = *((pte_t *)(&mem[l1_pte_paddr - MEM_BASE]));
+            l1_pte = *((pte_t *)(&main_mem[l1_pte_paddr - MEM_BASE]));
             if (!l1_pte.V)
                 goto tr_fin;
             if (l1_pte.R || l1_pte.W || l1_pte.X)
@@ -1058,10 +1033,11 @@ int mem_addr_translate(cpu_core_t *cpu, uint32_t vaddr, uint32_t *paddr, uint32_
 
                 *paddr = (l1_pte.PPN_1 << 22) | (vpn_0 << 12) | offset;
                 translate_sucess = 1;
+                // supperpage = 1;
                 if (rd & (READ | EXEC))
                     l1_pte.A = 1;
                 if (rd & (WRITE))
-                    l2_pte.D = 1;
+                    l1_pte.D = 1;
             }
             else
             {
@@ -1069,7 +1045,7 @@ int mem_addr_translate(cpu_core_t *cpu, uint32_t vaddr, uint32_t *paddr, uint32_
                 l2_pte_paddr += vpn_0 * 4;
                 if ((l2_pte_paddr >= MEM_BASE) && (l2_pte_paddr < MEM_BASE + MEM_SIZE))
                 {
-                    l2_pte = *((pte_t *)&mem[l2_pte_paddr - MEM_BASE]);
+                    l2_pte = *((pte_t *)&main_mem[l2_pte_paddr - MEM_BASE]);
                     if (!l2_pte.V)
                         goto tr_fin;
 
@@ -1105,6 +1081,11 @@ tr_fin:
         cpu->tlbs[asid_idx][tlb_idx].asid = cpu->SATP_asid;
         cpu->tlbs[asid_idx][tlb_idx].vaild = 1;
         cpu->tlbs[asid_idx][tlb_idx].permit = page_permit;
+        // if (supperpage)
+        //     cpu->tlbs[asid_idx][tlb_idx].pte = ((pte_t *)(&main_mem[l1_pte_paddr - MEM_BASE]));
+        // else
+        //     cpu->tlbs[asid_idx][tlb_idx].pte = ((pte_t *)(&main_mem[l2_pte_paddr - MEM_BASE]));
+
         cpu->last_access_vaddr = vaddr & (~0xFFF);
         cpu->last_access_paddr = *paddr & (~0xFFF);
 #endif
@@ -1121,25 +1102,89 @@ tr_fin:
     return EXC_STORE_PAGE_FAULT;
 }
 
+volatile uint32_t amo_spin_lock = 0;
+
+#if (MULTI_THREAD)
+#define MEMLK_CHUNK_SZ (4096)
+#define MEMLK_CHUNK_NR (0x100000000ULL / MEMLK_CHUNK_SZ)
+atomic_bool amo_spin_lock_blk[MEMLK_CHUNK_NR];
+#endif
+
 int mem_access(cpu_core_t *cpu, uint32_t addr, uint32_t len, void *dat, uint32_t rd)
 {
     uint32_t paddr = 0;
     int res;
+    if (((len == 2) && (addr % 2)) || ((len == 4) && (addr % 4)))
+    {
+#if !(UNAGLINED_MEM_ACCESS)
+        // printf("misaligned\n");
+        if (rd & READ)
+        {
+            res = EXC_LOAD_MISALIGNED;
+            trap(cpu, 0, EXC_LOAD_MISALIGNED, cpu->PC - cpu->inst_fetch_size, addr);
+            return res;
+        }
+        if (rd & WRITE)
+        {
+            res = EXC_STORE_MISALIGNED;
+            trap(cpu, 0, EXC_STORE_MISALIGNED, cpu->PC - cpu->inst_fetch_size, addr);
+            return res;
+        }
+        if (rd & EXEC)
+        {
+            res = EXC_INST_MISALIGNED;
+            trap(cpu, 0, EXC_INST_MISALIGNED, cpu->PC - cpu->inst_fetch_size, addr);
+            return res;
+        }
+#endif
+
+        uint32_t misalign_addr[4];
+        uint8_t *u8_dat = dat;
+        for (int i = 0; i < len; i++)
+        {
+            res = mem_addr_translate(cpu, addr, &misalign_addr[i], rd);
+            if (unlikely(res != EXC_OK))
+                goto translate_fail;
+            addr++;
+        }
+
+        for (int i = 0; i < len; i++)
+        {
+            res = mem_access_dispatch(cpu, misalign_addr[i], 1, &u8_dat[i], rd);
+            if (unlikely(res != EXC_OK))
+                goto access_fail;
+        }
+
+        goto access_success;
+    }
+
     res = mem_addr_translate(cpu, addr, &paddr, rd);
     if (unlikely(res != EXC_OK))
-    {
-        // printf("MEM TRANSLATE ERROR access 0x%08x, %d, rd=%d, PC=0x%08x, res:%d\n", addr, len, rd, cpu->PC, res);
-        trap(cpu, 0, res, cpu->PC - cpu->inst_fetch_size, addr);
-        return res;
-    }
+        goto translate_fail;
 
     res = mem_access_dispatch(cpu, paddr, len, dat, rd);
     if (unlikely(res != -1))
+        goto access_fail;
+
+access_success:
+
+    if (rd & WRITE)
     {
-        printf("MEM ACCESS ERROR at v:0x%08x, p:%08x,%d, rd=%d, PC=0x%08x, res=%d\n", addr, paddr, len, rd, cpu->PC, res);
-        // debug_dump_regs(cpu);
-        trap(cpu, 0, res, cpu->PC - cpu->inst_fetch_size, addr);
+        for (int i = 0; i < NR_CPU; i++)
+            if (load_resv_addr[i] == (addr >> 2))
+                load_resv_addr[i] = 0xFFFFFFFF;
     }
+
+    return res;
+
+access_fail:
+    printf("MEM ACCESS ERROR at v:0x%08x, p:%08x,%d, rd=%d, PC=0x%08x, res=%d\n", addr, paddr, len, rd, cpu->PC, res);
+    // debug_dump_regs(cpu);
+    trap(cpu, 0, res, cpu->PC - cpu->inst_fetch_size, addr);
+    return res;
+
+translate_fail:
+    trap(cpu, 0, res, cpu->PC - cpu->inst_fetch_size, addr);
     return res;
 }
 
@@ -1278,7 +1323,7 @@ int csr_access(cpu_core_t *cpu, uint32_t addr, void *dat, uint32_t rd)
         else
         {
             cpu->CSR[IDX_CSR_SSTATUS] = *((uint32_t *)dat);
-            if ((cpu->CSR[IDX_CSR_MSTATUS] & SR_MIE) || (cpu->CSR[IDX_CSR_SSTATUS] & SR_SIE))
+            // if ((cpu->CSR[IDX_CSR_MSTATUS] & SR_MIE) || (cpu->CSR[IDX_CSR_SSTATUS] & SR_SIE))
             {
                 // debug_dump_regs(cpu);
                 // printf("%08x,%08x\n",cpu->CSR[IDX_CSR_SIE],cpu->CSR[IDX_CSR_SIP] );
@@ -1383,12 +1428,14 @@ int check_interrupt(cpu_core_t *cpu)
 
         if (cpu->CSR[IDX_CSR_MIP] & cpu->CSR[IDX_CSR_MIE] & MIP_MEIP)
         {
+            // printf("trig meip:%d\n",cpu->id);
             trap(cpu, 1, IRQ_M_EXT, cpu->PC, 0);
             return 1;
         }
 
         if (cpu->CSR[IDX_CSR_MIP] & cpu->CSR[IDX_CSR_MIE] & MIP_MSIP)
         {
+            // printf("trig msip:%d\n",cpu->id);
             trap(cpu, 1, IRQ_M_SOFT, cpu->PC, 0);
             return 1;
         }
@@ -1410,12 +1457,14 @@ int check_interrupt(cpu_core_t *cpu)
         {
             if (cpu->CSR[IDX_CSR_SIP] & cpu->CSR[IDX_CSR_SIE] & MIP_SEIP)
             {
+                // printf("trig seip:%d\n",cpu->id);
                 trap(cpu, 1, IRQ_S_EXT, cpu->PC, 0);
                 return 1;
             }
 
             if (cpu->CSR[IDX_CSR_SIP] & cpu->CSR[IDX_CSR_SIE] & MIP_SSIP)
             {
+                // printf("trig ssip:%d\n", cpu->id);
                 trap(cpu, 1, IRQ_S_SOFT, cpu->PC, 0);
                 return 1;
             }
@@ -1432,10 +1481,10 @@ int check_interrupt(cpu_core_t *cpu)
         }
     }
 
-    return 1; // cpu->CSR[IDX_CSR_SIP] | cpu->CSR[IDX_CSR_MIP];
+    return 1; //cpu->CSR[IDX_CSR_SIP] | cpu->CSR[IDX_CSR_MIP] | (cpu->cycles < 1000000000);
 }
 
-void load_bin_to_ram(char *path, uint32_t off)
+void load_bin_to_ram(char *path, uint8_t *base, uint32_t off)
 {
     FILE *f = fopen(path, "rb");
     size_t fsz;
@@ -1443,7 +1492,7 @@ void load_bin_to_ram(char *path, uint32_t off)
     fsz = ftell(f);
     printf("img size:%lld\n", (uint64_t)fsz);
     fseek(f, 0, SEEK_SET);
-    fread(&mem[off], 1, fsz, f);
+    fread(&base[off], 1, fsz, f);
     fclose(f);
 }
 
@@ -1529,23 +1578,13 @@ void core_step(cpu_core_t *cpu)
     if (cpu->running)
     {
         cpu->wfi = !check_interrupt(cpu);
-
+        // cpu->chk_irq = 0;
         if (cpu->wfi)
             return;
 
         t0 = get_microsecond_timestamp();
         while (steps)
         {
-
-#if (MULTI_THREAD)
-            // while (cpu->stall)
-            //     sched_yield();
-            // ;
-            // if (cpu->stall)
-            //     return;
-#endif
-
-            // #endif
             cpu->REGS[ZERO] = 0;
             steps--;
             if (cpu->chk_irq)
@@ -1761,24 +1800,25 @@ void core_step(cpu_core_t *cpu)
                     uint32_t buf = 0;
                     uint32_t adr = 0;
                     int res = 0;
+                    // while (amo_spin_lock)
+                    //     ;
+                    adr = cpu->REGS[cpu->cont.rs1] + cpu->cont.imm;
+
                     switch (cpu->cont.funct3)
                     {
                     case 0x0: // lb
-                        adr = cpu->REGS[cpu->cont.rs1] + cpu->cont.imm;
                         res = mem_access(cpu, adr, 1, &buf, READ);
                         if (res != EXC_OK)
                             continue;
                         cpu->REGS[cpu->cont.rd] = (buf & 0x80) ? (buf | 0xFFFFFF00) : buf;
                         break;
                     case 0x1: // lh
-                        adr = cpu->REGS[cpu->cont.rs1] + cpu->cont.imm;
                         res = mem_access(cpu, adr, 2, &buf, READ);
                         if (res != EXC_OK)
                             continue;
                         cpu->REGS[cpu->cont.rd] = (buf & 0x8000) ? (buf | 0xFFFF0000) : buf;
                         break;
                     case 0x2: // lw
-                        adr = cpu->REGS[cpu->cont.rs1] + cpu->cont.imm;
                         res = mem_access(cpu, adr, 4, &buf, READ);
                         if (res != EXC_OK)
                             continue;
@@ -1792,7 +1832,6 @@ void core_step(cpu_core_t *cpu)
                         cpu->REGS[cpu->cont.rd] = buf;
                         break;
                     case 0x5: // lhu
-                        adr = cpu->REGS[cpu->cont.rs1] + cpu->cont.imm;
                         res = mem_access(cpu, adr, 2, &buf, READ);
                         if (res != EXC_OK)
                             continue;
@@ -1813,10 +1852,27 @@ void core_step(cpu_core_t *cpu)
                     cpu->cont.imm = (cpu->cont.imm & 0x800) ? (cpu->cont.imm | 0xFFFFF000) : cpu->cont.imm;
                     uint32_t adr = 0;
                     adr = cpu->REGS[cpu->cont.rs1] + cpu->cont.imm;
-                    if (cpu->cont.funct3 < 3)
-                        mem_access(cpu, adr, 1 << cpu->cont.funct3, &cpu->REGS[cpu->cont.rs2], WRITE);
-                    else
-                        UND_INS
+
+                    // while (amo_spin_lock)
+                    //     ;
+
+                    //
+#if MULTI_THREAD
+                    while (atomic_flag_test_and_set_explicit(&amo_spin_lock_blk[adr / MEMLK_CHUNK_SZ], __ATOMIC_ACQUIRE))
+                        cpu->lock_wait_st++;
+                    ;
+                    mem_access(cpu, adr, 1 << cpu->cont.funct3, &cpu->REGS[cpu->cont.rs2], WRITE);
+
+#else
+                    // while (amo_spin_lock)
+                    //     ;
+                    mem_access(cpu, adr, 1 << cpu->cont.funct3, &cpu->REGS[cpu->cont.rs2], WRITE);
+#endif
+
+#if MULTI_THREAD
+                    atomic_flag_clear_explicit(&amo_spin_lock_blk[adr / MEMLK_CHUNK_SZ], __ATOMIC_RELEASE);
+#endif
+
                     break;
                 }
                 //--------------------------------------------------------
@@ -1928,10 +1984,14 @@ void core_step(cpu_core_t *cpu)
                             COPY_MIx_TO_SIx(E);
                             COPY_MIx_TO_SIx(P);
 
+                            load_resv_addr[cpu->id] = -1UL;
+
                             cpu->PC = cpu->CSR[IDX_CSR_MEPC];
                             cpu->CSR[IDX_CSR_MSTATUS] &= ~SR_MIE;
                             cpu->CSR[IDX_CSR_MSTATUS] |= (cpu->CSR[IDX_CSR_MSTATUS] & SR_MPIE) ? SR_MIE : 0;
                             cpu->MODE = (cpu->CSR[IDX_CSR_MSTATUS] & SR_MPP) >> SR_MPP_BIT_SFT;
+
+                            cpu->chk_irq = 1;
                             break;
 
                         case 0b000100000010: // sret
@@ -1950,11 +2010,9 @@ void core_step(cpu_core_t *cpu)
                             cpu->CSR[IDX_CSR_SSTATUS] &= ~SR_SIE;
                             cpu->CSR[IDX_CSR_SSTATUS] |= (cpu->CSR[IDX_CSR_SSTATUS] & SR_SPIE) ? SR_SIE : 0;
                             cpu->MODE = (cpu->CSR[IDX_CSR_SSTATUS] & SR_SPP) >> SR_SPP_BIT_SFT;
-                            break;
 
-                            // case 0b000100000100: // sfence
-                            //                      // memset(cpu->tlbs, 0, sizeof(cpu->tlbs));
-                            //     break;
+                            cpu->chk_irq = 1;
+                            break;
 
                         case 0: // ecall
                                 // printf("ecall mode %d\n", cpu->MODE);
@@ -2086,33 +2144,28 @@ void core_step(cpu_core_t *cpu)
                     uint32_t funct5 = cpu->cont.funct7 >> 2;
                     uint32_t tmp = 0;
                     uint32_t old_val = 0;
+                    uint32_t adr = 0;
+                    adr = cpu->REGS[cpu->cont.rs1];
                     int res;
 
-                    // #if MULTI_THREAD
-                    //                     pthread_mutex_lock(&amo_mutex);
-                    // #endif
-
 #if (MULTI_THREAD)
-                    for (int i = 0; i < NR_CPU; i++)
-                    {
-                        if (i != cpu->id)
-                            cpu_core[i].stall = 1;
-                    }
+                    while (atomic_flag_test_and_set_explicit(&amo_spin_lock_blk[adr / MEMLK_CHUNK_SZ], __ATOMIC_ACQUIRE))
+                        cpu->lock_wait_amo_st++;
 #endif
 
                     switch (funct5)
                     {
                     case 0x02: // lr.w
-                        res = mem_access(cpu, cpu->REGS[cpu->cont.rs1], 4, &cpu->REGS[cpu->cont.rd], READ);
+                        res = mem_access(cpu, adr, 4, &cpu->REGS[cpu->cont.rd], READ);
                         if (res != EXC_OK)
                             break;
-                        load_resv_addr[cpu->id] = cpu->REGS[cpu->cont.rs1] / 4;
+                        load_resv_addr[cpu->id] = adr >> 2;
                         break;
                     case 0x03: // sc.w
-                        if ((cpu->REGS[cpu->cont.rs1] / 4) == load_resv_addr[cpu->id])
+                        if ((adr >> 2) == load_resv_addr[cpu->id])
                         // if(1)
                         {
-                            res = mem_access(cpu, cpu->REGS[cpu->cont.rs1], 4, &cpu->REGS[cpu->cont.rs2], WRITE);
+                            res = mem_access(cpu, adr, 4, &cpu->REGS[cpu->cont.rs2], WRITE);
                             if (res != EXC_OK)
                                 break;
                             cpu->REGS[cpu->cont.rd] = 0;
@@ -2121,17 +2174,17 @@ void core_step(cpu_core_t *cpu)
                         {
                             cpu->REGS[cpu->cont.rd] = 1;
                         }
-                        load_resv_addr[cpu->id] = -1;
+                        load_resv_addr[cpu->id] = 0xFFFFFFFF;
                         break;
 
                     case 0x01: // amoswap
                     {
-                        res = mem_access(cpu, cpu->REGS[cpu->cont.rs1], 4, &old_val, READ);
+                        res = mem_access(cpu, adr, 4, &old_val, READ);
                         if (res != EXC_OK)
                             break;
                         cpu->REGS[ZERO] = 0;
                         tmp = cpu->REGS[cpu->cont.rs2];
-                        res = mem_access(cpu, cpu->REGS[cpu->cont.rs1], 4, &tmp, WRITE);
+                        res = mem_access(cpu, adr, 4, &tmp, WRITE);
                         if (res != EXC_OK)
                             break;
                         cpu->REGS[cpu->cont.rd] = old_val;
@@ -2140,12 +2193,12 @@ void core_step(cpu_core_t *cpu)
 
                     case 0x00: // amoadd
                     {
-                        res = mem_access(cpu, cpu->REGS[cpu->cont.rs1], 4, &old_val, READ);
+                        res = mem_access(cpu, adr, 4, &old_val, READ);
                         if (res != EXC_OK)
                             break;
                         cpu->REGS[ZERO] = 0;
                         tmp = cpu->REGS[cpu->cont.rs2] + old_val;
-                        res = mem_access(cpu, cpu->REGS[cpu->cont.rs1], 4, &tmp, WRITE);
+                        res = mem_access(cpu, adr, 4, &tmp, WRITE);
                         if (res != EXC_OK)
                             break;
                         cpu->REGS[cpu->cont.rd] = old_val;
@@ -2154,12 +2207,12 @@ void core_step(cpu_core_t *cpu)
 
                     case 0x0C: // amoand
                     {
-                        res = mem_access(cpu, cpu->REGS[cpu->cont.rs1], 4, &old_val, READ);
+                        res = mem_access(cpu, adr, 4, &old_val, READ);
                         if (res != EXC_OK)
                             break;
                         cpu->REGS[ZERO] = 0;
                         tmp = cpu->REGS[cpu->cont.rs2] & old_val;
-                        res = mem_access(cpu, cpu->REGS[cpu->cont.rs1], 4, &tmp, WRITE);
+                        res = mem_access(cpu, adr, 4, &tmp, WRITE);
                         if (res != EXC_OK)
                             break;
                         cpu->REGS[cpu->cont.rd] = old_val;
@@ -2168,12 +2221,12 @@ void core_step(cpu_core_t *cpu)
 
                     case 0x08: // amoor
                     {
-                        res = mem_access(cpu, cpu->REGS[cpu->cont.rs1], 4, &old_val, READ);
+                        res = mem_access(cpu, adr, 4, &old_val, READ);
                         if (res != EXC_OK)
                             break;
                         cpu->REGS[ZERO] = 0;
                         tmp = cpu->REGS[cpu->cont.rs2] | old_val;
-                        res = mem_access(cpu, cpu->REGS[cpu->cont.rs1], 4, &tmp, WRITE);
+                        res = mem_access(cpu, adr, 4, &tmp, WRITE);
                         if (res != EXC_OK)
                             break;
                         cpu->REGS[cpu->cont.rd] = old_val;
@@ -2182,12 +2235,12 @@ void core_step(cpu_core_t *cpu)
 
                     case 0x04: // amoxor
                     {
-                        res = mem_access(cpu, cpu->REGS[cpu->cont.rs1], 4, &old_val, READ);
+                        res = mem_access(cpu, adr, 4, &old_val, READ);
                         if (res != EXC_OK)
                             break;
                         cpu->REGS[ZERO] = 0;
                         tmp = cpu->REGS[cpu->cont.rs2] ^ old_val;
-                        res = mem_access(cpu, cpu->REGS[cpu->cont.rs1], 4, &tmp, WRITE);
+                        res = mem_access(cpu, adr, 4, &tmp, WRITE);
                         if (res != EXC_OK)
                             break;
                         cpu->REGS[cpu->cont.rd] = old_val;
@@ -2195,12 +2248,12 @@ void core_step(cpu_core_t *cpu)
                     }
                     case 0x14: // amomax
                     {
-                        res = mem_access(cpu, cpu->REGS[cpu->cont.rs1], 4, &old_val, READ);
+                        res = mem_access(cpu, adr, 4, &old_val, READ);
                         if (res != EXC_OK)
                             break;
                         cpu->REGS[ZERO] = 0;
                         tmp = __max((int32_t)cpu->REGS[cpu->cont.rs2], (int32_t)old_val);
-                        res = mem_access(cpu, cpu->REGS[cpu->cont.rs1], 4, &tmp, WRITE);
+                        res = mem_access(cpu, adr, 4, &tmp, WRITE);
                         if (res != EXC_OK)
                             break;
                         cpu->REGS[cpu->cont.rd] = old_val;
@@ -2208,12 +2261,12 @@ void core_step(cpu_core_t *cpu)
                     }
                     case 0x1c: // amomaxu
                     {
-                        res = mem_access(cpu, cpu->REGS[cpu->cont.rs1], 4, &old_val, READ);
+                        res = mem_access(cpu, adr, 4, &old_val, READ);
                         if (res != EXC_OK)
                             break;
                         cpu->REGS[ZERO] = 0;
                         tmp = __max(cpu->REGS[cpu->cont.rs2], old_val);
-                        res = mem_access(cpu, cpu->REGS[cpu->cont.rs1], 4, &tmp, WRITE);
+                        res = mem_access(cpu, adr, 4, &tmp, WRITE);
                         if (res != EXC_OK)
                             break;
                         cpu->REGS[cpu->cont.rd] = old_val;
@@ -2221,12 +2274,12 @@ void core_step(cpu_core_t *cpu)
                     }
                     case 0x10: // amomin
                     {
-                        res = mem_access(cpu, cpu->REGS[cpu->cont.rs1], 4, &old_val, READ);
+                        res = mem_access(cpu, adr, 4, &old_val, READ);
                         if (res != EXC_OK)
                             break;
                         cpu->REGS[ZERO] = 0;
                         tmp = __min((int32_t)cpu->REGS[cpu->cont.rs2], (int32_t)old_val);
-                        res = mem_access(cpu, cpu->REGS[cpu->cont.rs1], 4, &tmp, WRITE);
+                        res = mem_access(cpu, adr, 4, &tmp, WRITE);
                         if (res != EXC_OK)
                             break;
                         cpu->REGS[cpu->cont.rd] = old_val;
@@ -2234,12 +2287,12 @@ void core_step(cpu_core_t *cpu)
                     }
                     case 0x18: // amominu
                     {
-                        res = mem_access(cpu, cpu->REGS[cpu->cont.rs1], 4, &old_val, READ);
+                        res = mem_access(cpu, adr, 4, &old_val, READ);
                         if (res != EXC_OK)
                             break;
                         cpu->REGS[ZERO] = 0;
                         tmp = __min(cpu->REGS[cpu->cont.rs2], old_val);
-                        res = mem_access(cpu, cpu->REGS[cpu->cont.rs1], 4, &tmp, WRITE);
+                        res = mem_access(cpu, adr, 4, &tmp, WRITE);
                         if (res != EXC_OK)
                             break;
                         cpu->REGS[cpu->cont.rd] = old_val;
@@ -2253,22 +2306,15 @@ void core_step(cpu_core_t *cpu)
                     }
 
 #if (MULTI_THREAD)
-                    for (int i = 0; i < NR_CPU; i++)
-                    {
-                        if (i != cpu->id)
-                            cpu_core[i].stall = 0;
-                    }
+                    atomic_flag_clear_explicit(&amo_spin_lock_blk[adr / MEMLK_CHUNK_SZ], __ATOMIC_RELEASE);
 #endif
+
                     break;
                 }
                 default:
                     UND_INS
                     break;
                 }
-
-                // #if MULTI_THREAD
-                //                 pthread_mutex_unlock(&amo_mutex);
-                // #endif
             }
             else
             {
@@ -2685,8 +2731,9 @@ void plic_check_interrupt()
 void cpu_core_init(cpu_core_t *cpu)
 {
     memset(cpu, 0, sizeof(cpu_core_t));
-    cpu->PC = MEM_BASE + MEM_SIZE - 512 * 1024;
+    // cpu->PC = MEM_BASE + MEM_SIZE - 512 * 1024;
     // cpu->PC = MEM_BASE;
+    cpu->PC = SBI_BASE;
     cpu->REGS[SP] = MEM_BASE + MEM_SIZE - 1024;
     cpu->MODE = M_MODE;
     memset(&cpu->CSR, 0, IDX_CSR_NUMS * 4);
@@ -2698,8 +2745,8 @@ void cpu_core_init(cpu_core_t *cpu)
     cpu->CSR[IDX_CSR_MSTATUS] |= SR_MIE;
     cpu->CSR[IDX_CSR_MSTATUS] |= SR_MPIE;
 
-    cpu->CSR[IDX_CSR_MIE] |= (1 << IRQ_M_SOFT);
-    cpu->CSR[IDX_CSR_MIP] &= ~(1 << IRQ_M_SOFT);
+    // cpu->CSR[IDX_CSR_MIE] |= (1 << IRQ_M_SOFT);
+    // cpu->CSR[IDX_CSR_MIP] &= ~(1 << IRQ_M_SOFT);
 
     cpu->CSR[IDX_CSR_MTVEC] = cpu->PC;
     cpu->CSR[IDX_CSR_STVEC] = cpu->PC;
@@ -2716,11 +2763,15 @@ void *cpu_thread(void *threadid)
 {
     int tid;
     tid = (uptr_t)threadid;
-    if (tid)
-        cpu_core[tid].wfi = 1;
-    while (1)
+    // if (tid)
+    //     return 0;
+    //     // cpu_core[tid].running = 1;
+    printf("vCPU:%d starting...\n", tid);
+    for (;;)
     {
         core_step(&cpu_core[tid]);
+        // if(cpu_core[tid].wfi)
+        //     usleep(1000);
         // sched_yield();
         // update_microsecond_timestamp();
     }
@@ -2762,6 +2813,12 @@ void ctrlc(int sig)
                    cpu_core[i].tlb_hit * 100.0 / (cpu_core[i].tlb_hit + cpu_core[i].tlb_miss));
         }
 #endif
+
+        for (int i = 0; i < NR_CPU; i++)
+        {
+            printf("cpu:%d, mem_st_spinlock_cnt:%lld, mem_amo_st_spinlock_cnt:%lld \n", i,
+                   cpu_core[i].lock_wait_st, cpu_core[i].lock_wait_amo_st);
+        }
         break;
     case 'q':
     case 'Q':
@@ -2791,24 +2848,55 @@ int main(int argc, char *argv[])
     // fcntl(STDIN_FILENO, F_SETFL, oldf);
 #endif
     signal(SIGINT, ctrlc);
-    mem = calloc(1, MEM_SIZE);
-    memset(load_resv_addr, 0xFF, sizeof(load_resv_addr));
+    main_mem = calloc(1, MEM_SIZE);
+    framebuffer = calloc(1, VRAM_SIZE);
+    memset((void *)load_resv_addr, 0xFF, sizeof(load_resv_addr));
+    // memset((void *)amo_addr, 0xFF, sizeof(amo_addr));
+    memset((void *)amo_spin_lock_blk, 0, sizeof(amo_spin_lock_blk));
+    memset(uart_in_buf, 0, sizeof(uart_in_buf));
+
+    
+    load_bin_to_ram("\\\\wsl.localhost\\Ubuntu-22.04\\home\\nahida\\kernel\\sbi2\\opensbi\\out\\platform\\simemu\\firmware\\fw_jump.bin", sbi_fw_mem, 0);
+    load_bin_to_ram("D:\\ExtendedPart\\sim_rv32_git\\riscv32-simemu\\config\\simemu-mmu.dtb", fdt_fw_mem, 0);
+
+    // load_bin_to_ram("/home/nahida/kernel/sbi2/opensbi/out/platform/simemu/firmware/fw_jump.bin",  sbi_fw_mem, 0);
+    // load_bin_to_ram("/mnt/d/ExtendedPart/sim_rv32_git/riscv32-simemu/config/simemu-mmu.dtb", fdt_fw_mem, 0);
+
     if (argc > 1)
-        load_bin_to_ram(argv[1], 0);
+        load_bin_to_ram(argv[1], main_mem, 0);
     else
         // load_bin_to_ram("D:\\ExtendedPart\\RiscV\\riscv-tests\\isa\\rv32um-p-mulh.bin", 0);
-        // load_bin_to_ram("D:\\ExtendedPart\\RiscV\\pj1\\build\\rv_cm.bin", 0);
-        load_bin_to_ram("\\\\wsl.localhost\\Ubuntu-22.04\\home\\nahida\\kernel\\linux-6.12-rc7\\out\\arch\\riscv\\boot\\Image", 0);
-        // load_bin_to_ram("/home/nahida/kernel/linux-6.12-rc7/out/arch/riscv/boot/Image", 0);
+        // load_bin_to_ram("D:\\ExtendedPart\\RiscV\\pj1\\build\\rv_cm.bin", main_mem,  0);
+        load_bin_to_ram("\\\\wsl.localhost\\Ubuntu-22.04\\home\\nahida\\kernel\\linux-6.12-rc7\\out\\arch\\riscv\\boot\\Image", main_mem, 0);
+        // load_bin_to_ram("/home/nahida/kernel/linux-6.12-rc7/out/arch/riscv/boot/Image", main_mem, 0);
 
     // load_bin_to_ram("\\\\wsl.localhost\\Ubuntu-22.04\\home\\nahida\\kernel\\linux-6.11.7\\out\\arch\\riscv\\boot\\Image", 0);
     // load_bin_to_ram("\\\\wsl.localhost\\Ubuntu-22.04\\home\\nahida\\kernel\\linux-6.10.1\\out\\arch\\riscv\\boot\\Image", 0);
     // load_bin_to_ram("\\\\wsl.localhost\\Ubuntu-22.04\\home\\nahida\\kernel\\linux-6.10.1\\out\\arch\\riscv\\boot\\Image", 0);
     // load_bin_to_ram("\\\\wsl.localhost\\Ubuntu-22.04\\home\\nahida\\kernel\\opensbi-1.5.1\\out\\platform\\simemu\\firmware\\fw_jump.bin", MEM_SIZE - 512 * 1024);
-    load_bin_to_ram("\\\\wsl.localhost\\Ubuntu-22.04\\home\\nahida\\kernel\\opensbi\\out\\platform\\simemu\\firmware\\fw_jump.bin", MEM_SIZE - 512 * 1024);
+
     // load_bin_to_ram("/home/nahida/kernel/opensbi/out/platform/simemu/firmware/fw_jump.bin", MEM_SIZE - 512 * 1024);
 
     // load_bin_to_ram("../simemu.dtb", MEM_SIZE - 1*1048576);
+
+    SDL_Event event;
+    if (SDL_Init(SDL_INIT_VIDEO) < 0)
+    {
+        fprintf(stderr, "Failed to initialize SDL: %s\n", SDL_GetError());
+        return -1;
+    }
+    SDL_Window *window;
+    window = SDL_CreateWindow("RISCV32 SimEmu", SDL_WINDOWPOS_UNDEFINED,
+                              SDL_WINDOWPOS_UNDEFINED, VIDEO_WIDTH, VIDEO_HEIGHT,
+                              SDL_WINDOW_SHOWN);
+    SDL_Renderer *renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
+    SDL_Texture *texture = SDL_CreateTexture(
+        renderer,
+        SDL_PIXELFORMAT_ABGR8888,
+        SDL_TEXTUREACCESS_STREAMING,
+        VIDEO_WIDTH, VIDEO_HEIGHT);
+
+    int kext1 = 0, kext2 = 0, in_window = 0;
 
     for (int i = 0; i < NR_CPU; i++)
     {
@@ -2819,7 +2907,8 @@ int main(int argc, char *argv[])
 
     // for (int i = 1; i < NR_CPU; i++)
     //     cpu_core[i].running = 0;
-
+    cpu_core[0].CSR[IDX_CSR_MIP] |= MIP_MTIP;
+    cpu_core[1].CSR[IDX_CSR_MIP] |= MIP_MSIP;
     for (int i = 1; i < NR_CPU; i++)
         cpu_core[i].wfi = 1;
 
@@ -2832,10 +2921,11 @@ int main(int argc, char *argv[])
     {
         pthread_create(&threads[i], NULL, cpu_thread, (ptr_t)i);
     }
-
-#endif
+#else
     uint64_t t0 = get_microsecond_timestamp();
-    while (1)
+#endif
+
+    for (;;)
     {
 #if !MULTI_THREAD
         for (int i = 0; i < NR_CPU; i++)
@@ -2845,20 +2935,104 @@ int main(int argc, char *argv[])
         // core_step(&cpu_core[rand() % NR_CPU]);
         // core_step(&cpu_core[(rand() % 100) < 60]);
         // core_step(&cpu_core[0]);
-#else
-        usleep(10000);
-#endif
 
-        if (get_microsecond_timestamp() - t0 > 30000)
+        if (get_microsecond_timestamp() - t0 > 20000)
         {
             t0 = get_microsecond_timestamp();
-            plic_check_interrupt();
+#else
+        usleep(20000);
+        {
+#endif
             if (unlikely(_kbhit()))
+            {
                 uart_send_char(_getch());
+            }
+
+            while (SDL_PollEvent(&event))
+            {
+                if ((event.type == SDL_KEYDOWN) || (event.type == SDL_KEYUP))
+                {
+
+                    if (event.key.keysym.scancode == SDL_SCANCODE_LCTRL)
+                        kext1 = (event.type == SDL_KEYDOWN);
+                    if (event.key.keysym.scancode == SDL_SCANCODE_GRAVE)
+                        kext2 = (event.type == SDL_KEYDOWN);
+
+                    if (kext1 && kext2)
+                    {
+                        SDL_SetWindowGrab(window, SDL_DISABLE);
+                        SDL_SetRelativeMouseMode(SDL_DISABLE);
+                        SDL_ShowCursor(SDL_ENABLE);
+                        in_window = 0;
+                        SDL_SetWindowTitle(window, "RISCV32 SimEmu");
+                    }
+                    else
+                    {
+                        virtio_send_key_evt(event.key.keysym.scancode, event.type == SDL_KEYDOWN);
+                    }
+                }
+
+                if ((event.type == SDL_MOUSEMOTION))
+                {
+                    if (in_window)
+                        virtio_send_mouse_rel_evt(
+                            event.motion.xrel,
+                            event.motion.yrel,
+                            -1,
+                            -1, 0);
+                }
+
+                if ((event.type == SDL_MOUSEWHEEL))
+                {
+                    if (in_window)
+                        virtio_send_mouse_rel_evt(
+                            0,
+                            0,
+                            -1,
+                            -1, event.wheel.y);
+                }
+
+                if ((event.type == SDL_MOUSEBUTTONDOWN) || (event.type == SDL_MOUSEBUTTONUP))
+                {
+                    if (!in_window && (event.type == SDL_MOUSEBUTTONUP))
+                    {
+                        SDL_SetWindowGrab(window, SDL_ENABLE);
+                        SDL_SetRelativeMouseMode(SDL_ENABLE);
+                        SDL_ShowCursor(SDL_DISABLE);
+                        in_window = 1;
+                        SDL_SetWindowTitle(window, "RISCV32 SimEmu (Ctrl + ~ release mouse)");
+                    }
+
+                    if (in_window)
+                        virtio_send_mouse_rel_evt(
+                            0,
+                            0,
+                            (event.button.button == SDL_BUTTON_LEFT) && (event.type == SDL_MOUSEBUTTONDOWN),
+                            (event.button.button == SDL_BUTTON_RIGHT) && (event.type == SDL_MOUSEBUTTONDOWN), 0);
+                }
+
+                if (event.type == SDL_QUIT)
+                {
+                    goto fin;
+                }
+            }
+            SDL_UpdateTexture(texture, NULL, framebuffer, VIDEO_WIDTH * 4);
+            SDL_RenderClear(renderer);
+            SDL_RenderCopy(renderer, texture, NULL, NULL);
+            SDL_RenderPresent(renderer);
+
+            plic_check_interrupt();
         }
     }
+fin:
 
-    free(mem);
+#if MULTI_THREAD
+    for (uptr_t i = 0; i < NR_CPU; i++)
+        pthread_kill(threads[i], SIGTERM);
+#endif
+    sleep(1);
+    free(main_mem);
+    free(framebuffer);
     debug_dump_regs(&cpu_core[0]);
     printf("exit.\n");
     return cpu_core[0].REGS[10];

@@ -3,13 +3,17 @@
 
 ![alt text](imgs/b8c441772f004cf114c82497b9674acd.png)
 
+![alt text](imgs/7007d77a3784d3dc80acb0198782a482.png)
+
  - [x] RV32I Basic integer instruction
  - [x] RV32A atomic-instruction extension
  - [x] RV32M integer multiplication
  - [x] RV32C compressed instruction-set extension
  - [x] 8250 UART
  - [x] SV32 MMU
- - [x] SMP muilt-cpu/harts supported
+ - [x] SMP multithreading cpu/harts simulating supported
+ - [x] virtio input keyboard and mouse
+ - [x] simple framebuffer display
  
 
 ```
@@ -20,6 +24,8 @@
                initramfs with buildroot contained.
 ```
 
+SMP multi-process coremark test:
 
-### bugs
-  SMP may deadlock in muilt-threading cpu threads.
+![alt text](imgs/8e46f8d7419711c76f030eb311958278.png)
+
+![alt text](imgs/c39d6525b46c69ed5ab939da9877fefc.png)

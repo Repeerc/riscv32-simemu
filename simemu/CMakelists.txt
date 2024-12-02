@@ -1,10 +1,15 @@
 cmake_minimum_required (VERSION 3.6)
 project (sim_rv32)
 
+# libsdl2-dev
+
+include_directories(libsdl2/include/SDL2)
+if(CMAKE_HOST_SYSTEM_NAME MATCHES "Windows")
+link_directories(libsdl2/lib)
+endif()
 
 file(GLOB SOURCES *.h *.c)
 add_executable(${PROJECT_NAME} ${SOURCES})
 target_compile_options(${PROJECT_NAME} PRIVATE -Ofast -Wall -DNDEBUG)
-
-target_link_libraries(${PROJECT_NAME} -static pthread) 
+target_link_libraries(${PROJECT_NAME}  pthread -lSDL2main -lSDL2)  # -lmingw32 
 
