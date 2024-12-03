@@ -7,7 +7,7 @@
 #define MULTI_THREAD (1)
 #define ENABLE_RV32C (0)
 #define ENABLE_TLB (1)
-#define UNAGLINED_MEM_ACCESS (1)
+#define UNAGLINED_MEM_ACCESS (0)
 #define COLLECT_TLB_STATUS (0)
 
 #define NR_CPU 4
@@ -19,7 +19,9 @@
 
 #define MEM_BASE 0x80000000
 #define MEM_BASE2 0x90000000
-#define MEM_SIZE 1048576 * 512
+#define MEM_BASE3 0xA0000000
+#define MEM_BASE4 0xB0000000
+#define MEM_SIZE (1048576ULL * 256)
 
 #define UART8250_BASE 0x10000000
 
@@ -42,6 +44,8 @@
 #define VRAM_BASE 0x40000000
 #define VRAM_SIZE (VIDEO_WIDTH * VIDEO_HEIGHT * 4)
 #define VIRTIO_BASE1 0x50000000
+
+#define VIRTIO_BLK_BASE 0x60000000
 
 #define NOP 0b000
 #define READ 0b001
@@ -75,6 +79,7 @@ typedef struct extirq_def_t
 extern extirq_def_t extirq_slot[NR_IRQ];
 
 #define IRQ_NUM_VIRTIO_INTPUT (1)
+#define IRQ_NUM_VIRTIO_BLK (2)
 #define IRQ_NUM_UART (10)
 
 #if defined(__x86_64__) || defined(__i386__)

@@ -147,19 +147,19 @@ int virtio_input_mmio_access(uint32_t off, uint32_t len, int rd, void *dat)
         case VIRTIO_MMIO_QUEUE_DESC_LOW:
             if (rd & WRITE)
                 store_m(p_val, 0, len, dat);
-            printf("set desc adr:%08x\n", tval);
+            // printf("set desc adr:%08x\n", tval);
             vq[vqs].desc_base = (virtq_desc_t *)&main_mem[tval - MEM_BASE];
             break;
         case VIRTIO_MMIO_QUEUE_AVAIL_LOW:
             if (rd & WRITE)
                 store_m(p_val, 0, len, dat);
-            printf("set avail adr:%08x\n", tval);
+            // printf("set avail adr:%08x\n", tval);
             vq[vqs].avail_base = (virtq_avail_t *)&main_mem[tval - MEM_BASE];
             break;
         case VIRTIO_MMIO_QUEUE_USED_LOW:
             if (rd & WRITE)
                 store_m(p_val, 0, len, dat);
-            printf("set used adr:%08x\n", tval);
+            // printf("set used adr:%08x\n", tval);
             vq[vqs].used_base = (virtq_used_t *)&main_mem[tval - MEM_BASE];
             break;
 
@@ -172,7 +172,7 @@ int virtio_input_mmio_access(uint32_t off, uint32_t len, int rd, void *dat)
             else
             {
                 store_m(p_val, 0, len, dat);
-                printf("set ready:%d\n", tval);
+                // printf("set ready:%d\n", tval);
                 if (tval)
                 {
                     vq[vqs].ready = tval;
@@ -184,12 +184,12 @@ int virtio_input_mmio_access(uint32_t off, uint32_t len, int rd, void *dat)
         case VIRTIO_MMIO_QUEUE_SEL:
             if (rd & WRITE)
                 store_m(p_val, 0, len, dat);
-            printf("vmmio,sel q:%d\n", tval);
+            // printf("vmmio,sel q:%d\n", tval);
             break;
         case VIRTIO_MMIO_QUEUE_NUM:
             if (rd & WRITE)
                 store_m(p_val, 0, len, dat);
-            printf("vmmio,use sizeof q:%d\n", tval);
+            // printf("vmmio,use sizeof q:%d\n", tval);
             break;
         case VIRTIO_MMIO_QUEUE_NUM_MAX:
             tval = NR_VIRTQ;
@@ -200,7 +200,7 @@ int virtio_input_mmio_access(uint32_t off, uint32_t len, int rd, void *dat)
         case VIRTIO_MMIO_CONFIG:
             if (rd & WRITE)
                 store_m(p_val, 0, len, dat);
-            printf("vmmio,conf set:0x%x\n", tval);
+            // printf("vmmio,conf set:0x%x\n", tval);
             break;
 
         case VIRTIO_MMIO_INTERRUPT_STATUS:
@@ -223,7 +223,7 @@ int virtio_input_mmio_access(uint32_t off, uint32_t len, int rd, void *dat)
             break;
 
         default:
-            printf("virtio access:%x,%d\n", off, rd & READ);
+            // printf("virtio access:%x,%d\n", off, rd & READ);
             break;
         }
     }
@@ -235,7 +235,9 @@ int virtio_input_mmio_access(uint32_t off, uint32_t len, int rd, void *dat)
             // memset(&conf, 0, sizeof(conf));
             store_m(((uint8_t *)&conf), off, len, dat);
             // conf.size = 0;
-            printf(" sconf,sel:%x,subsel:%x\n", conf.select, conf.subsel);
+
+            // printf(" sconf,sel:%x,subsel:%x\n", conf.select, conf.subsel);
+
             if ((conf.select == VIRTIO_INPUT_CFG_ID_NAME) && (conf.subsel == 0))
             {
                 conf.size = sizeof(INDEV_STR);
@@ -268,7 +270,7 @@ int virtio_input_mmio_access(uint32_t off, uint32_t len, int rd, void *dat)
     return EXC_OK;
 }
 
-void dump_vq(int j)
+void dump_vq(virtq_t *vq, int j)
 {
     virtq_desc_t *desc = vq[j].desc_base;
     virtq_used_t *used = vq[j].used_base;
@@ -309,7 +311,7 @@ void virtio_vqs_put(void *dat, uint32_t len)
     }
     else
     {
-        printf("vqsof\n");
+        // printf("vqsof\n");
     }
 }
 

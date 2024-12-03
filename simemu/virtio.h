@@ -42,8 +42,15 @@ typedef struct virtq_t
     int kicked;
 }virtq_t;
 
+void dump_vq(virtq_t *vq, int j);
 
 int virtio_input_mmio_access(uint32_t off, uint32_t len, int rd, void *dat);
 void virtio_send_key_evt(int sdl_key, int down);
 void virtio_send_mouse_rel_evt(int x, int y, int lb, int rb, int whl);
+
+
+int virtio_blk_mmio_access(uint32_t off, uint32_t len, int rd, void *dat);
+void vdisk_init();
+void vdisk_uninit();
+
 

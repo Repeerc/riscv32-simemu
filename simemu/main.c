@@ -317,7 +317,7 @@ typedef struct permit_bit_t
 
 typedef struct tlb_t
 {
-    // pte_t *pte;
+    pte_t *pte;
     uint32_t vaddr;
     uint32_t paddr;
     uint16_t asid;
@@ -395,11 +395,8 @@ uint8_t fdt_fw_mem[1048576];
 uint8_t *framebuffer;
 volatile uint32_t load_resv_addr[NR_CPU];
 
-#if MULTI_THREAD
-pthread_mutex_t amo_mutex;
-pthread_mutex_t mem_mutex;
-#endif
 
+void plic_check_interrupt();
 volatile uint64_t usec_time_start = 0;
 
 uint64_t now_microsecond_timestamp()
@@ -411,10 +408,10 @@ uint64_t now_microsecond_timestamp()
 
 uint64_t get_microsecond_timestamp()
 {
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    return tv.tv_sec * 1000000LL + tv.tv_usec;
-    // return now_microsecond_timestamp() - usec_time_start;
+    // struct timeval tv;
+    // gettimeofday(&tv, NULL);
+    // return tv.tv_sec * 1000000LL + tv.tv_usec;
+    return now_microsecond_timestamp() - usec_time_start;
 }
 
 void debug_dump_regs(cpu_core_t *cpu)
@@ -488,6 +485,8 @@ int mem_access_dispatch(cpu_core_t *cpu, uint32_t addr, uint32_t len, void *dat,
         }
     }
     break;
+    case (MEM_BASE4):
+    case (MEM_BASE3):
     case (MEM_BASE2):
     case (MEM_BASE):
     {
@@ -516,6 +515,16 @@ int mem_access_dispatch(cpu_core_t *cpu, uint32_t addr, uint32_t len, void *dat,
         uint32_t off = addr - VIRTIO_BASE1;
         return virtio_input_mmio_access(off, len, rd, dat);
     }
+
+    case VIRTIO_BLK_BASE:
+    {
+        uint32_t off = addr - VIRTIO_BLK_BASE;
+        int ret = virtio_blk_mmio_access(off, len, rd, dat);
+        plic_check_interrupt();
+        cpu->chk_irq = 1;
+        return ret;
+    }
+
 
     case (VRAM_BASE):
     {
@@ -659,8 +668,8 @@ int mem_access_dispatch(cpu_core_t *cpu, uint32_t addr, uint32_t len, void *dat,
                     cpu_core[cpu_idx].exti_context_enable[context_idx] = *((uint32_t *)dat);
                     // printf("set plic enable:ctx=%d,cpu:%d, %d, v=%08x\n", context_idx, cpu_idx, irqbit_idx, *((uint32_t *)dat));
                 }
-                return EXC_OK;
             }
+            return EXC_OK;
         }
         else if (off >= PLIC_PENDING_BASE)
         {
@@ -960,7 +969,7 @@ int mem_addr_translate(cpu_core_t *cpu, uint32_t vaddr, uint32_t *paddr, uint32_
     }
 
 #if ENABLE_TLB
-    // int supperpage = 0;
+    int supperpage = 0;
 
     if ((vaddr & (~0xFFF)) == (cpu->last_access_vaddr & (~0xFFF)))
     {
@@ -989,10 +998,10 @@ int mem_addr_translate(cpu_core_t *cpu, uint32_t vaddr, uint32_t *paddr, uint32_
         translate_sucess = 1;
         cpu->last_access_vaddr = vaddr & (~0xFFF);
         cpu->last_access_paddr = *paddr & (~0xFFF);
-        // if (rd & (READ | EXEC))
-        //     cpu->tlbs[asid_idx][tlb_idx].pte->A = 1;
-        // if (rd & (WRITE))
-        //     cpu->tlbs[asid_idx][tlb_idx].pte->D = 1;
+        if (rd & (READ | EXEC))
+            cpu->tlbs[asid_idx][tlb_idx].pte->A = 1;
+        if (rd & (WRITE))
+            cpu->tlbs[asid_idx][tlb_idx].pte->D = 1;
         return EXC_OK;
     }
     else
@@ -1033,7 +1042,7 @@ int mem_addr_translate(cpu_core_t *cpu, uint32_t vaddr, uint32_t *paddr, uint32_
 
                 *paddr = (l1_pte.PPN_1 << 22) | (vpn_0 << 12) | offset;
                 translate_sucess = 1;
-                // supperpage = 1;
+                supperpage = 1;
                 if (rd & (READ | EXEC))
                     l1_pte.A = 1;
                 if (rd & (WRITE))
@@ -1081,10 +1090,10 @@ tr_fin:
         cpu->tlbs[asid_idx][tlb_idx].asid = cpu->SATP_asid;
         cpu->tlbs[asid_idx][tlb_idx].vaild = 1;
         cpu->tlbs[asid_idx][tlb_idx].permit = page_permit;
-        // if (supperpage)
-        //     cpu->tlbs[asid_idx][tlb_idx].pte = ((pte_t *)(&main_mem[l1_pte_paddr - MEM_BASE]));
-        // else
-        //     cpu->tlbs[asid_idx][tlb_idx].pte = ((pte_t *)(&main_mem[l2_pte_paddr - MEM_BASE]));
+        if (supperpage)
+            cpu->tlbs[asid_idx][tlb_idx].pte = ((pte_t *)(&main_mem[l1_pte_paddr - MEM_BASE]));
+        else
+            cpu->tlbs[asid_idx][tlb_idx].pte = ((pte_t *)(&main_mem[l2_pte_paddr - MEM_BASE]));
 
         cpu->last_access_vaddr = vaddr & (~0xFFF);
         cpu->last_access_paddr = *paddr & (~0xFFF);
@@ -1102,12 +1111,10 @@ tr_fin:
     return EXC_STORE_PAGE_FAULT;
 }
 
-volatile uint32_t amo_spin_lock = 0;
-
 #if (MULTI_THREAD)
-#define MEMLK_CHUNK_SZ (4096)
+#define MEMLK_CHUNK_SZ (1024 / NR_CPU)
 #define MEMLK_CHUNK_NR (0x100000000ULL / MEMLK_CHUNK_SZ)
-atomic_bool amo_spin_lock_blk[MEMLK_CHUNK_NR];
+volatile atomic_bool amo_spin_lock_blk[MEMLK_CHUNK_NR];
 #endif
 
 int mem_access(cpu_core_t *cpu, uint32_t addr, uint32_t len, void *dat, uint32_t rd)
@@ -1154,19 +1161,17 @@ int mem_access(cpu_core_t *cpu, uint32_t addr, uint32_t len, void *dat, uint32_t
             if (unlikely(res != EXC_OK))
                 goto access_fail;
         }
-
-        goto access_success;
     }
+    else
+    {
+        res = mem_addr_translate(cpu, addr, &paddr, rd);
+        if (unlikely(res != EXC_OK))
+            goto translate_fail;
 
-    res = mem_addr_translate(cpu, addr, &paddr, rd);
-    if (unlikely(res != EXC_OK))
-        goto translate_fail;
-
-    res = mem_access_dispatch(cpu, paddr, len, dat, rd);
-    if (unlikely(res != -1))
-        goto access_fail;
-
-access_success:
+        res = mem_access_dispatch(cpu, paddr, len, dat, rd);
+        if (unlikely(res != -1))
+            goto access_fail;
+    }
 
     if (rd & WRITE)
     {
@@ -1453,40 +1458,47 @@ int check_interrupt(cpu_core_t *cpu)
     if ((cpu->CSR[IDX_CSR_SSTATUS] & SR_SIE))
     {
         // printf("stip:%d\n",cpu->CSR[IDX_CSR_SIP] & MIP_STIP );
-        if (cpu->MODE != M_MODE)
+        if (cpu->MODE == M_MODE)
+            goto fin;
+
+        if (cpu->CSR[IDX_CSR_SIP] & cpu->CSR[IDX_CSR_SIE] & MIP_SEIP)
         {
-            if (cpu->CSR[IDX_CSR_SIP] & cpu->CSR[IDX_CSR_SIE] & MIP_SEIP)
-            {
-                // printf("trig seip:%d\n",cpu->id);
-                trap(cpu, 1, IRQ_S_EXT, cpu->PC, 0);
-                return 1;
-            }
+            // printf("trig seip:%d\n",cpu->id);
+            trap(cpu, 1, IRQ_S_EXT, cpu->PC, 0);
+            return 1;
+        }
 
-            if (cpu->CSR[IDX_CSR_SIP] & cpu->CSR[IDX_CSR_SIE] & MIP_SSIP)
-            {
-                // printf("trig ssip:%d\n", cpu->id);
-                trap(cpu, 1, IRQ_S_SOFT, cpu->PC, 0);
-                return 1;
-            }
+        if (cpu->CSR[IDX_CSR_SIP] & cpu->CSR[IDX_CSR_SIE] & MIP_SSIP)
+        {
+            // printf("trig ssip:%d\n", cpu->id);
+            trap(cpu, 1, IRQ_S_SOFT, cpu->PC, 0);
+            return 1;
+        }
 
-            if (cpu->CSR[IDX_CSR_SIE] & MIP_STIP)
+        if (cpu->CSR[IDX_CSR_SIE] & MIP_STIP)
+        {
+            if (cpu->CSR[IDX_CSR_SIP] & MIP_STIP)
             {
-                if (cpu->CSR[IDX_CSR_SIP] & MIP_STIP)
-                {
-                    // printf("trig stip:%d\n",cpu->id);
-                    trap(cpu, 1, IRQ_S_TIMER, cpu->PC, 0);
-                    return 1;
-                }
+                // printf("trig stip:%d\n",cpu->id);
+                trap(cpu, 1, IRQ_S_TIMER, cpu->PC, 0);
+                return 1;
             }
         }
     }
 
-    return 1; //cpu->CSR[IDX_CSR_SIP] | cpu->CSR[IDX_CSR_MIP] | (cpu->cycles < 1000000000);
+fin:
+
+    return 1; // cpu->CSR[IDX_CSR_SIP] | cpu->CSR[IDX_CSR_MIP] | (cpu->cycles < 1000000000);
 }
 
 void load_bin_to_ram(char *path, uint8_t *base, uint32_t off)
 {
     FILE *f = fopen(path, "rb");
+    if(!f)
+    {
+        printf("Failed to load:%s\n", path);
+        exit(1);
+    }
     size_t fsz;
     fseek(f, 0, SEEK_END);
     fsz = ftell(f);
@@ -1578,7 +1590,6 @@ void core_step(cpu_core_t *cpu)
     if (cpu->running)
     {
         cpu->wfi = !check_interrupt(cpu);
-        // cpu->chk_irq = 0;
         if (cpu->wfi)
             return;
 
@@ -1800,8 +1811,7 @@ void core_step(cpu_core_t *cpu)
                     uint32_t buf = 0;
                     uint32_t adr = 0;
                     int res = 0;
-                    // while (amo_spin_lock)
-                    //     ;
+
                     adr = cpu->REGS[cpu->cont.rs1] + cpu->cont.imm;
 
                     switch (cpu->cont.funct3)
@@ -1853,10 +1863,6 @@ void core_step(cpu_core_t *cpu)
                     uint32_t adr = 0;
                     adr = cpu->REGS[cpu->cont.rs1] + cpu->cont.imm;
 
-                    // while (amo_spin_lock)
-                    //     ;
-
-                    //
 #if MULTI_THREAD
                     while (atomic_flag_test_and_set_explicit(&amo_spin_lock_blk[adr / MEMLK_CHUNK_SZ], __ATOMIC_ACQUIRE))
                         cpu->lock_wait_st++;
@@ -1864,8 +1870,6 @@ void core_step(cpu_core_t *cpu)
                     mem_access(cpu, adr, 1 << cpu->cont.funct3, &cpu->REGS[cpu->cont.rs2], WRITE);
 
 #else
-                    // while (amo_spin_lock)
-                    //     ;
                     mem_access(cpu, adr, 1 << cpu->cont.funct3, &cpu->REGS[cpu->cont.rs2], WRITE);
 #endif
 
@@ -2737,9 +2741,7 @@ void cpu_core_init(cpu_core_t *cpu)
     cpu->REGS[SP] = MEM_BASE + MEM_SIZE - 1024;
     cpu->MODE = M_MODE;
     memset(&cpu->CSR, 0, IDX_CSR_NUMS * 4);
-#if ENABLE_TLB
-    memset(cpu->tlbs, 0, sizeof(cpu->tlbs));
-#endif
+
     cpu->CSR[IDX_CSR_MSTATUS] &= ~SR_MPP;
     cpu->CSR[IDX_CSR_MSTATUS] |= (cpu->MODE << SR_MPP_BIT_SFT);
     cpu->CSR[IDX_CSR_MSTATUS] |= SR_MIE;
@@ -2767,14 +2769,18 @@ void *cpu_thread(void *threadid)
     //     return 0;
     //     // cpu_core[tid].running = 1;
     printf("vCPU:%d starting...\n", tid);
-    for (;;)
+    // for (;;)
+    while (cpu_core[tid].running)
     {
         core_step(&cpu_core[tid]);
-        // if(cpu_core[tid].wfi)
-        //     usleep(1000);
+        if (cpu_core[tid].wfi)
+            usleep(2000);
+        cpu_core[tid].wfi = 0;
+
         // sched_yield();
         // update_microsecond_timestamp();
     }
+    return NULL;
 }
 #endif
 
@@ -2855,7 +2861,6 @@ int main(int argc, char *argv[])
     memset((void *)amo_spin_lock_blk, 0, sizeof(amo_spin_lock_blk));
     memset(uart_in_buf, 0, sizeof(uart_in_buf));
 
-    
     load_bin_to_ram("\\\\wsl.localhost\\Ubuntu-22.04\\home\\nahida\\kernel\\sbi2\\opensbi\\out\\platform\\simemu\\firmware\\fw_jump.bin", sbi_fw_mem, 0);
     load_bin_to_ram("D:\\ExtendedPart\\sim_rv32_git\\riscv32-simemu\\config\\simemu-mmu.dtb", fdt_fw_mem, 0);
 
@@ -2868,7 +2873,7 @@ int main(int argc, char *argv[])
         // load_bin_to_ram("D:\\ExtendedPart\\RiscV\\riscv-tests\\isa\\rv32um-p-mulh.bin", 0);
         // load_bin_to_ram("D:\\ExtendedPart\\RiscV\\pj1\\build\\rv_cm.bin", main_mem,  0);
         load_bin_to_ram("\\\\wsl.localhost\\Ubuntu-22.04\\home\\nahida\\kernel\\linux-6.12-rc7\\out\\arch\\riscv\\boot\\Image", main_mem, 0);
-        // load_bin_to_ram("/home/nahida/kernel/linux-6.12-rc7/out/arch/riscv/boot/Image", main_mem, 0);
+    // load_bin_to_ram("/home/nahida/kernel/linux-6.12-rc7/out/arch/riscv/boot/Image", main_mem, 0);
 
     // load_bin_to_ram("\\\\wsl.localhost\\Ubuntu-22.04\\home\\nahida\\kernel\\linux-6.11.7\\out\\arch\\riscv\\boot\\Image", 0);
     // load_bin_to_ram("\\\\wsl.localhost\\Ubuntu-22.04\\home\\nahida\\kernel\\linux-6.10.1\\out\\arch\\riscv\\boot\\Image", 0);
@@ -2896,6 +2901,9 @@ int main(int argc, char *argv[])
         SDL_TEXTUREACCESS_STREAMING,
         VIDEO_WIDTH, VIDEO_HEIGHT);
 
+    
+    vdisk_init();
+
     int kext1 = 0, kext2 = 0, in_window = 0;
 
     for (int i = 0; i < NR_CPU; i++)
@@ -2914,8 +2922,7 @@ int main(int argc, char *argv[])
 
     usec_time_start = now_microsecond_timestamp();
 #if MULTI_THREAD
-    pthread_mutex_init(&amo_mutex, NULL);
-    pthread_mutex_init(&mem_mutex, NULL);
+
     pthread_t threads[NR_CPU];
     for (uptr_t i = 0; i < NR_CPU; i++)
     {
@@ -3027,10 +3034,12 @@ int main(int argc, char *argv[])
 fin:
 
 #if MULTI_THREAD
-    for (uptr_t i = 0; i < NR_CPU; i++)
-        pthread_kill(threads[i], SIGTERM);
+    for (int i = 0; i < NR_CPU; i++)
+        cpu_core[i].running = 0;
+    for (int i = 0; i < NR_CPU; i++)
+        pthread_join(threads[i], NULL);
 #endif
-    sleep(1);
+    vdisk_uninit();
     free(main_mem);
     free(framebuffer);
     debug_dump_regs(&cpu_core[0]);

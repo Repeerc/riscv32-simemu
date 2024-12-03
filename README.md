@@ -3,7 +3,7 @@
 
 ![alt text](imgs/b8c441772f004cf114c82497b9674acd.png)
 
-![alt text](imgs/7007d77a3784d3dc80acb0198782a482.png)
+![alt text](imgs/ed4ec3515b25bb5677ba347c2649add3.png)
 
  - [x] RV32I Basic integer instruction
  - [x] RV32A atomic-instruction extension
@@ -13,6 +13,7 @@
  - [x] SV32 MMU
  - [x] SMP multithreading cpu/harts simulating supported
  - [x] virtio input keyboard and mouse
+ - [x] virtio block disk
  - [x] simple framebuffer display
  
 
