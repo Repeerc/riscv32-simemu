@@ -358,13 +358,16 @@ typedef struct cpu_core_t
     uint32_t last_access_vaddr;
     uint32_t last_access_paddr;
     tlb_t tlbs[TLB_ASID_ITEMS][TLB_ADDR_ITEMS];
-#if COLLECT_TLB_STATUS
+#if COLLECT_PERF_STATUS
     uint64_t tlb_hit;
     uint64_t tlb_miss;
-#endif
-
     uint64_t lock_wait_st;
     uint64_t lock_wait_amo_st;
+#endif
+
+    uint64_t debug_cycs;
+    uint64_t debug_t0;
+
 
 #endif
 
@@ -381,9 +384,6 @@ typedef struct cpu_core_t
     uint32_t exti_context_piorid[NR_IRQ_CONTEXT_PER_CPU];
     uint32_t exti_context_pending_irq[NR_IRQ_CONTEXT_PER_CPU];
 
-    uint64_t debug_cycs;
-    uint64_t debug_t0;
-
 } cpu_core_t;
 
 extirq_def_t extirq_slot[NR_IRQ];
@@ -394,7 +394,6 @@ uint8_t sbi_fw_mem[1048576];
 uint8_t fdt_fw_mem[1048576];
 uint8_t *framebuffer;
 volatile uint32_t load_resv_addr[NR_CPU];
-
 
 void plic_check_interrupt();
 volatile uint64_t usec_time_start = 0;
@@ -428,11 +427,6 @@ void debug_dump_regs(cpu_core_t *cpu)
     printf("MIE,SIE=%d,%d\n", cpu->CSR[IDX_CSR_MSTATUS] & SR_MIE, cpu->CSR[IDX_CSR_SSTATUS] & SR_SIE);
     printf("MIE,MIP=%08x,%08x\n", cpu->CSR[IDX_CSR_MIE], cpu->CSR[IDX_CSR_MIP]);
     printf("SIE,SIP=%08x,%08x\n", cpu->CSR[IDX_CSR_SIE], cpu->CSR[IDX_CSR_SIP]);
-
-    uint64_t t = get_microsecond_timestamp();
-    printf("MIPS:%.3f\n", (double)(cpu->cycles - cpu->debug_cycs) / (t - cpu->debug_t0));
-    cpu->debug_t0 = t;
-    cpu->debug_cycs = cpu->cycles;
 }
 
 void uart_send_char(char c)
@@ -520,11 +514,10 @@ int mem_access_dispatch(cpu_core_t *cpu, uint32_t addr, uint32_t len, void *dat,
     {
         uint32_t off = addr - VIRTIO_BLK_BASE;
         int ret = virtio_blk_mmio_access(off, len, rd, dat);
-        plic_check_interrupt();
+        // plic_check_interrupt();
         cpu->chk_irq = 1;
         return ret;
     }
-
 
     case (VRAM_BASE):
     {
@@ -991,7 +984,7 @@ int mem_addr_translate(cpu_core_t *cpu, uint32_t vaddr, uint32_t *paddr, uint32_
         if((cpu->MODE == U_MODE) && !page_permit.U) {cpu->tlbs[asid_idx][tlb_idx].vaild = 0; goto tr_fin;}
         // clang-format on
 
-#if COLLECT_TLB_STATUS
+#if COLLECT_PERF_STATUS
         cpu->tlb_hit++;
 #endif
         *paddr = cpu->tlbs[asid_idx][tlb_idx].paddr | (vaddr & 0xFFF);
@@ -1007,7 +1000,7 @@ int mem_addr_translate(cpu_core_t *cpu, uint32_t vaddr, uint32_t *paddr, uint32_
     else
 #endif
     {
-#if COLLECT_TLB_STATUS
+#if COLLECT_PERF_STATUS
         cpu->tlb_miss++;
 #endif
         // printf("VADDR:%08x\n", vaddr);
@@ -1112,9 +1105,56 @@ tr_fin:
 }
 
 #if (MULTI_THREAD)
-#define MEMLK_CHUNK_SZ (1024 / NR_CPU)
+#define MEMLK_CHUNK_SZ (4096 / NR_CPU)
+// #define MEMLK_CHUNK_SZ (4096 * 4)
+// #define MEMLK_CHUNK_SZ (1048576*256)
 #define MEMLK_CHUNK_NR (0x100000000ULL / MEMLK_CHUNK_SZ)
-volatile atomic_bool amo_spin_lock_blk[MEMLK_CHUNK_NR];
+#if AMO_SPIN_LOCK
+volatile atomic_int amo_spin_lock_blk[MEMLK_CHUNK_NR] = {0};
+#else
+atomic_char g_rwlock[MEMLK_CHUNK_NR] = {0};
+
+inline void rw_lock_read_lock(cpu_core_t *cpu, atomic_char *lock)
+{
+    while (1)
+    {
+        char expected = atomic_load(lock);
+        if (expected >= 0 && atomic_compare_exchange_weak(lock, &expected, expected + 1))
+            return;
+
+        usleep(rand() % 10000);
+#if COLLECT_PERF_STATUS
+        cpu->lock_wait_st++;
+#endif
+    }
+}
+
+inline void rw_lock_read_unlock(atomic_char *lock)
+{
+    atomic_fetch_sub(lock, 1);
+}
+
+inline void rw_lock_write_lock(cpu_core_t *cpu, atomic_char *lock)
+{
+    while (1)
+    {
+        char expected = 0;
+        if (atomic_compare_exchange_weak(lock, &expected, -1))
+            return;
+        usleep(rand() % 10000);
+#if COLLECT_PERF_STATUS
+        cpu->lock_wait_amo_st++;
+#endif
+    }
+}
+
+inline void rw_lock_write_unlock(atomic_char *lock)
+{
+    atomic_store(lock, 0);
+}
+
+#endif
+
 #endif
 
 int mem_access(cpu_core_t *cpu, uint32_t addr, uint32_t len, void *dat, uint32_t rd)
@@ -1420,7 +1460,7 @@ int check_interrupt(cpu_core_t *cpu)
 {
 
     // printf ("ie:%d\n",(cpu->CSR[IDX_CSR_MSTATUS] & SR_MIE) ||  (cpu->CSR[IDX_CSR_SSTATUS] & SR_SIE));
-
+    plic_check_interrupt(cpu->id);
     if (cpu->CLINT_TIMER_CMP && ((get_microsecond_timestamp() >= cpu->CLINT_TIMER_CMP)))
         cpu->CSR[IDX_CSR_MIP] |= MIP_MTIP;
     if (cpu->STIMER_CMP && (get_microsecond_timestamp() >= cpu->STIMER_CMP))
@@ -1461,17 +1501,17 @@ int check_interrupt(cpu_core_t *cpu)
         if (cpu->MODE == M_MODE)
             goto fin;
 
-        if (cpu->CSR[IDX_CSR_SIP] & cpu->CSR[IDX_CSR_SIE] & MIP_SEIP)
-        {
-            // printf("trig seip:%d\n",cpu->id);
-            trap(cpu, 1, IRQ_S_EXT, cpu->PC, 0);
-            return 1;
-        }
-
         if (cpu->CSR[IDX_CSR_SIP] & cpu->CSR[IDX_CSR_SIE] & MIP_SSIP)
         {
             // printf("trig ssip:%d\n", cpu->id);
             trap(cpu, 1, IRQ_S_SOFT, cpu->PC, 0);
+            return 1;
+        }
+
+        if (cpu->CSR[IDX_CSR_SIP] & cpu->CSR[IDX_CSR_SIE] & MIP_SEIP)
+        {
+            // printf("trig seip:%d\n",cpu->id);
+            trap(cpu, 1, IRQ_S_EXT, cpu->PC, 0);
             return 1;
         }
 
@@ -1494,7 +1534,7 @@ fin:
 void load_bin_to_ram(char *path, uint8_t *base, uint32_t off)
 {
     FILE *f = fopen(path, "rb");
-    if(!f)
+    if (!f)
     {
         printf("Failed to load:%s\n", path);
         exit(1);
@@ -1864,9 +1904,15 @@ void core_step(cpu_core_t *cpu)
                     adr = cpu->REGS[cpu->cont.rs1] + cpu->cont.imm;
 
 #if MULTI_THREAD
+#if AMO_SPIN_LOCK
                     while (atomic_flag_test_and_set_explicit(&amo_spin_lock_blk[adr / MEMLK_CHUNK_SZ], __ATOMIC_ACQUIRE))
+                    {
+                        usleep(rand() % 10000);
                         cpu->lock_wait_st++;
-                    ;
+                    }
+#else
+                    rw_lock_read_lock(cpu, &g_rwlock[adr / MEMLK_CHUNK_SZ]);
+#endif
                     mem_access(cpu, adr, 1 << cpu->cont.funct3, &cpu->REGS[cpu->cont.rs2], WRITE);
 
 #else
@@ -1874,7 +1920,11 @@ void core_step(cpu_core_t *cpu)
 #endif
 
 #if MULTI_THREAD
+#if AMO_SPIN_LOCK
                     atomic_flag_clear_explicit(&amo_spin_lock_blk[adr / MEMLK_CHUNK_SZ], __ATOMIC_RELEASE);
+#else
+                    rw_lock_read_unlock(&g_rwlock[adr / MEMLK_CHUNK_SZ]);
+#endif
 #endif
 
                     break;
@@ -2003,7 +2053,7 @@ void core_step(cpu_core_t *cpu)
                             if (unlikely(cpu->MODE != S_MODE))
                             {
                                 printf("===================");
-                                printf("SRET NOT IN M_MODE\n");
+                                printf("SRET NOT IN S_MODE\n");
                                 printf("===================");
                                 UND_INS;
                             }
@@ -2141,6 +2191,7 @@ void core_step(cpu_core_t *cpu)
                     break;
                 }
                 case OPCODE_FENCE:
+                    cpu->last_access_vaddr = 0;
                     break;
                 case OPCODE_AMO:
                 {
@@ -2153,8 +2204,16 @@ void core_step(cpu_core_t *cpu)
                     int res;
 
 #if (MULTI_THREAD)
+#if AMO_SPIN_LOCK
                     while (atomic_flag_test_and_set_explicit(&amo_spin_lock_blk[adr / MEMLK_CHUNK_SZ], __ATOMIC_ACQUIRE))
+                    {
+                        usleep(rand() % 10000);
                         cpu->lock_wait_amo_st++;
+                    }
+#else
+                    rw_lock_write_lock(cpu, &g_rwlock[adr / MEMLK_CHUNK_SZ]);
+
+#endif
 #endif
 
                     switch (funct5)
@@ -2310,7 +2369,11 @@ void core_step(cpu_core_t *cpu)
                     }
 
 #if (MULTI_THREAD)
+#if AMO_SPIN_LOCK
                     atomic_flag_clear_explicit(&amo_spin_lock_blk[adr / MEMLK_CHUNK_SZ], __ATOMIC_RELEASE);
+#else
+                    rw_lock_write_unlock(&g_rwlock[adr / MEMLK_CHUNK_SZ]);
+#endif
 #endif
 
                     break;
@@ -2701,14 +2764,19 @@ void core_step(cpu_core_t *cpu)
     }
 }
 
-void plic_check_interrupt()
+void plic_check_interrupt(int j)
 {
+    if (cpu_core[j].exti_context_pending_irq[0])
+        return;
+    if (cpu_core[j].exti_context_pending_irq[1])
+        return;
+
     for (int i = 0; i < NR_IRQ; i++)
     {
         if (extirq_slot[i].pending)
         {
             uint32_t bit = (1 << i);
-            for (int j = 0; j < NR_CPU; j++)
+            // for (int j = 0; j < NR_CPU; j++)
             {
                 if (cpu_core[j].exti_context_enable[0] & bit) // M EXTI
                 {
@@ -2724,7 +2792,7 @@ void plic_check_interrupt()
                     {
                         cpu_core[j].exti_context_pending_irq[1] = i;
                         cpu_core[j].CSR[IDX_CSR_SIP] |= MIP_SEIP;
-                        // cpu_core[j].CSR[IDX_CSR_MIP] |= MIP_SEIP;
+                        cpu_core[j].CSR[IDX_CSR_MIP] |= MIP_SEIP;
                     }
                 }
             }
@@ -2774,7 +2842,7 @@ void *cpu_thread(void *threadid)
     {
         core_step(&cpu_core[tid]);
         if (cpu_core[tid].wfi)
-            usleep(2000);
+            usleep(1000);
         cpu_core[tid].wfi = 0;
 
         // sched_yield();
@@ -2810,21 +2878,33 @@ void ctrlc(int sig)
         break;
     case 's':
     case 'S':
-#if COLLECT_TLB_STATUS
+#if COLLECT_PERF_STATUS
         for (int i = 0; i < NR_CPU; i++)
         {
-            printf("cpu:%d, hit/miss:%lld/%lld,rate: %.2f\n", i,
+            printf("cpu:%d, hit/miss:%lld/%lld,rate: %.2f  ", i,
                    cpu_core[i].tlb_hit,
                    cpu_core[i].tlb_miss,
                    cpu_core[i].tlb_hit * 100.0 / (cpu_core[i].tlb_hit + cpu_core[i].tlb_miss));
+
+            printf("cpu:%d, mem_st_spinlock_cnt:%lld, mem_amo_st_spinlock_cnt:%lld  ", i,
+                   cpu_core[i].lock_wait_st, cpu_core[i].lock_wait_amo_st);
+
+            uint64_t t = get_microsecond_timestamp();
+            printf("  MIPS:%.3f. cycles:%lld\n", (double)(cpu_core[i].cycles - cpu_core[i].debug_cycs) / (t - cpu_core[i].debug_t0), cpu_core[i].cycles);
+            cpu_core[i].debug_t0 = t;
+            cpu_core[i].debug_cycs = cpu_core[i].cycles;
         }
-#endif
+#else
 
         for (int i = 0; i < NR_CPU; i++)
         {
-            printf("cpu:%d, mem_st_spinlock_cnt:%lld, mem_amo_st_spinlock_cnt:%lld \n", i,
-                   cpu_core[i].lock_wait_st, cpu_core[i].lock_wait_amo_st);
+            uint64_t t = get_microsecond_timestamp();
+            printf("  MIPS:%.3f. cycles:%lld\n", (double)(cpu_core[i].cycles - cpu_core[i].debug_cycs) / (t - cpu_core[i].debug_t0), cpu_core[i].cycles);
+            cpu_core[i].debug_t0 = t;
+            cpu_core[i].debug_cycs = cpu_core[i].cycles;
         }
+#endif
+
         break;
     case 'q':
     case 'Q':
@@ -2858,7 +2938,6 @@ int main(int argc, char *argv[])
     framebuffer = calloc(1, VRAM_SIZE);
     memset((void *)load_resv_addr, 0xFF, sizeof(load_resv_addr));
     // memset((void *)amo_addr, 0xFF, sizeof(amo_addr));
-    memset((void *)amo_spin_lock_blk, 0, sizeof(amo_spin_lock_blk));
     memset(uart_in_buf, 0, sizeof(uart_in_buf));
 
     load_bin_to_ram("\\\\wsl.localhost\\Ubuntu-22.04\\home\\nahida\\kernel\\sbi2\\opensbi\\out\\platform\\simemu\\firmware\\fw_jump.bin", sbi_fw_mem, 0);
@@ -2901,7 +2980,6 @@ int main(int argc, char *argv[])
         SDL_TEXTUREACCESS_STREAMING,
         VIDEO_WIDTH, VIDEO_HEIGHT);
 
-    
     vdisk_init();
 
     int kext1 = 0, kext2 = 0, in_window = 0;
@@ -3028,7 +3106,7 @@ int main(int argc, char *argv[])
             SDL_RenderCopy(renderer, texture, NULL, NULL);
             SDL_RenderPresent(renderer);
 
-            plic_check_interrupt();
+            // plic_check_interrupt();
         }
     }
 fin:

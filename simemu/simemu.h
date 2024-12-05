@@ -7,8 +7,9 @@
 #define MULTI_THREAD (1)
 #define ENABLE_RV32C (0)
 #define ENABLE_TLB (1)
-#define UNAGLINED_MEM_ACCESS (0)
-#define COLLECT_TLB_STATUS (0)
+#define UNAGLINED_MEM_ACCESS (1)
+#define COLLECT_PERF_STATUS (1)
+#define AMO_SPIN_LOCK  (0)
 
 #define NR_CPU 4
 #define NR_IRQ_CONTEXT_PER_CPU 2

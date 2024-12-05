@@ -311,7 +311,7 @@ void virtio_vqs_put(void *dat, uint32_t len)
     }
     else
     {
-        // printf("vqsof\n");
+        printf("vqsof\n");
     }
 }
 
