@@ -110,7 +110,10 @@ int virtio_blk_mmio_access(uint32_t off, uint32_t len, int rd, void *dat)
             if (feature_sel)
                 tval |= (1 << (VIRTIO_F_VERSION_1 - 32));
             else
-                tval |= (1 << VIRTIO_BLK_F_MQ);
+            {
+                tval = 0;
+                // tval |= (1 << VIRTIO_BLK_F_MQ);
+            }
             if (rd & READ)
                 fetch_m(p_val, 0, len, dat);
             break;
@@ -296,7 +299,8 @@ int virtio_blk_mmio_access(uint32_t off, uint32_t len, int rd, void *dat)
                 fetch_m(p_val, 0, len, dat);
         } else if (off == 0x22)
         {
-            tval = 1;//NR_MAX_VQS;
+            tval = 1;
+            // tval = NR_MAX_VQS;
             if (rd & READ)
                 fetch_m(p_val, 0, len, dat);
         }

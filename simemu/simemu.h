@@ -4,6 +4,7 @@
 #define likely(x) __builtin_expect(!!(x), 1)
 #define unlikely(x) __builtin_expect(!!(x), 0)
 
+#define ICACHE  (1)
 #define MULTI_THREAD (1)
 #define ENABLE_RV32C (0)
 #define ENABLE_TLB (1)
@@ -11,7 +12,7 @@
 #define COLLECT_PERF_STATUS (1)
 #define AMO_SPIN_LOCK  (0)
 
-#define NR_CPU 4
+#define NR_CPU 2
 #define NR_IRQ_CONTEXT_PER_CPU 2
 #define NR_IRQ (16 + 1)
 

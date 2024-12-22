@@ -90,38 +90,6 @@
 				compatible = "riscv,cpu-intc";  
 			};
 		};
-        
-		cpu2: cpu@2 { 
-			device_type = "cpu";
-			reg = <2>;
-			status = "okay";
-			compatible = "riscv";
-			riscv,isa = "rv32imac"; 
-			mmu-type = "riscv,sv32";
-
-			cpu2_intc: interrupt-controller {
-				#interrupt-cells = <1>; 
-				#address-cells = <1>;
-				interrupt-controller;
-				compatible = "riscv,cpu-intc";  
-			};
-		};
-        
-		cpu3: cpu@3 { 
-			device_type = "cpu";
-			reg = <3>;
-			status = "okay";
-			compatible = "riscv";
-			riscv,isa = "rv32imac"; 
-			mmu-type = "riscv,sv32";
-
-			cpu3_intc: interrupt-controller {
-				#interrupt-cells = <1>; 
-				#address-cells = <1>;
-				interrupt-controller;
-				compatible = "riscv,cpu-intc";  
-			};
-		};
         };
 	soc {
 		#address-cells = <1>;
@@ -132,9 +100,7 @@
 		clint0: timer@20000000 {
 			interrupts-extended = 
                         <&cpu0_intc 3>, <&cpu0_intc 7>,
-                        <&cpu1_intc 3>, <&cpu1_intc 7>,
-                        <&cpu2_intc 3>, <&cpu2_intc 7>,
-                        <&cpu3_intc 3>, <&cpu3_intc 7>;
+                        <&cpu1_intc 3>, <&cpu1_intc 7>;
 
 		reg = <0x20000000 0x10000>;
 		compatible =  "riscv,clint0";
@@ -148,9 +114,7 @@
 			interrupt-controller;
 			interrupts-extended = //11=MEXTI  9=SEXTI, 
                         <&cpu0_intc 11>, <&cpu0_intc 9>,
-                        <&cpu1_intc 11>, <&cpu1_intc 9>,
-                        <&cpu2_intc 11>, <&cpu2_intc 9>,
-                        <&cpu3_intc 11>, <&cpu3_intc 9>;
+                        <&cpu1_intc 11>, <&cpu1_intc 9>;
 
 			riscv,ndev = <16>;
 		};

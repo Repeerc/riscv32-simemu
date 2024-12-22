@@ -162,7 +162,7 @@ def append_plic(nr_cpus):
 '''
     return t
 
-nr_cpus = 4
+nr_cpus = 2
 dts = upper + append_cpu(nr_cpus) + soc_start + append_clint(nr_cpus) + append_plic(nr_cpus) +soc_end 
 with open("simemu-mmu.dts", "w+") as f:
     f.write(dts)

@@ -60,6 +60,19 @@ int _kbhit(void)
 #define __min(a, b) (((a) < (b)) ? (a) : (b))
 #else
 #include <conio.h>
+#include <windows.h>
+// int __cdecl __MINGW_NOTHROW usleep(useconds_t usec)
+// {
+//     HANDLE timer;
+//     LARGE_INTEGER interval;
+//     interval.QuadPart = -(10 * usec);
+
+//     timer = CreateWaitableTimer(NULL, TRUE, NULL);
+//     SetWaitableTimer(timer, &interval, 0, NULL, NULL, 0);
+//     WaitForSingleObject(timer, INFINITE);
+//     CloseHandle(timer);
+//     return 0;
+// }
 #endif
 
 // clang-format off
@@ -295,6 +308,7 @@ uint8_t UART8250_LSR = (UART_LSR_TEMT | UART_LSR_THRE);
 int uart_in_buf_wr_p = 0;
 int uart_in_buf_rd_p = 0;
 char uart_in_buf[64];
+char uart_out_buf = 0;
 
 // int mem_lock = 0;
 
@@ -317,24 +331,39 @@ typedef struct permit_bit_t
 
 typedef struct tlb_t
 {
-    pte_t *pte;
-    uint32_t vaddr;
-    uint32_t paddr;
+    // pte_t *pte;
+    uint32_t vpn;
+    uint32_t ppn;
     uint16_t asid;
-    uint8_t vaild;
+    uint8_t valid;
     permit_bit_t permit;
 } tlb_t;
 
-#define TLB_ADDR_ITEMS (0x40)
+#define TLB_ADDR_ITEMS (1 << 7)
 #define TLB_ADDR_ITEM_MASK (TLB_ADDR_ITEMS - 1)
 
-#define TLB_ASID_ITEMS (0x20)
+#define TLB_ASID_ITEMS (1 << 6)
 #define TLB_ASID_ITEM_MASK (TLB_ASID_ITEMS - 1)
 
 #define TLB_ADDR_HASH(x) (((x) >> 12) & TLB_ADDR_ITEM_MASK)
 #define TLB_ASID_HASH(x) ((x) & TLB_ASID_ITEM_MASK)
 
 #endif
+
+#define ICACHE_ITEMS (1 << 13)
+#define ICACHE_ITEM_MASK (ICACHE_ITEMS - 1)
+#define ICACHE_HASH(x) (((x) >> 2) & ICACHE_ITEM_MASK)
+
+#define DCACHE_ITEMS (1 << 13)
+#define DCACHE_ITEM_MASK (DCACHE_ITEMS - 1)
+#define DCACHE_HASH(x) ((x) & DCACHE_ITEM_MASK)
+
+typedef struct cache_t
+{
+    uint32_t vaddr;
+    uint32_t val;
+    uint32_t valid;
+} cache_t;
 
 typedef struct cpu_core_t
 {
@@ -354,22 +383,26 @@ typedef struct cpu_core_t
 
     uint64_t cycles;
 
+    cache_t icache[ICACHE_ITEMS];
+    cache_t dcache[DCACHE_ITEMS];
 #if ENABLE_TLB
-    uint32_t last_access_vaddr;
-    uint32_t last_access_paddr;
+    uint32_t last_access_vpn;
+    uint32_t last_access_ppn;
     tlb_t tlbs[TLB_ASID_ITEMS][TLB_ADDR_ITEMS];
+
+#endif
+
 #if COLLECT_PERF_STATUS
     uint64_t tlb_hit;
     uint64_t tlb_miss;
+    uint64_t icache_hit;
+    uint64_t icache_miss;
     uint64_t lock_wait_st;
     uint64_t lock_wait_amo_st;
 #endif
 
     uint64_t debug_cycs;
     uint64_t debug_t0;
-
-
-#endif
 
     uint16_t SATP_asid;
 
@@ -394,6 +427,8 @@ uint8_t sbi_fw_mem[1048576];
 uint8_t fdt_fw_mem[1048576];
 uint8_t *framebuffer;
 volatile uint32_t load_resv_addr[NR_CPU];
+
+volatile atomic_int LR_lock = 0;
 
 void plic_check_interrupt();
 volatile uint64_t usec_time_start = 0;
@@ -510,11 +545,17 @@ int mem_access_dispatch(cpu_core_t *cpu, uint32_t addr, uint32_t len, void *dat,
         return virtio_input_mmio_access(off, len, rd, dat);
     }
 
+        static atomic_bool ioblk_lk = 0;
+
     case VIRTIO_BLK_BASE:
     {
         uint32_t off = addr - VIRTIO_BLK_BASE;
+        while (atomic_flag_test_and_set(&ioblk_lk))
+            ;
         int ret = virtio_blk_mmio_access(off, len, rd, dat);
-        // plic_check_interrupt();
+
+        atomic_flag_clear(&ioblk_lk);
+        // plic_check_interrupt(cpu->id);
         cpu->chk_irq = 1;
         return ret;
     }
@@ -560,6 +601,7 @@ int mem_access_dispatch(cpu_core_t *cpu, uint32_t addr, uint32_t len, void *dat,
             }
             else
             {
+                uart_out_buf = *((char *)dat);
                 putchar(*((char *)dat));
             }
             return EXC_OK;
@@ -798,7 +840,7 @@ void trap(cpu_core_t *cpu, int interrupt, int reason, uint32_t exception_pc, uin
     else
         DELEG = ((1 << reason) & cpu->CSR[IDX_CSR_MEDELEG]);
     // for (int i = 0; i < NR_CPU; i++)
-    load_resv_addr[cpu->id] = -1UL;
+    load_resv_addr[cpu->id] = 0xFFFFFFFF;
     if (DELEG)
     {
         if (interrupt && !(cpu->CSR[IDX_CSR_SSTATUS] & SR_SIE))
@@ -941,7 +983,7 @@ void debug_dump_mmap(cpu_core_t *cpu)
     }
 }
 
-int mem_addr_translate(cpu_core_t *cpu, uint32_t vaddr, uint32_t *paddr, uint32_t rd)
+static inline int mem_addr_translate(cpu_core_t *cpu, uint32_t vaddr, uint32_t *paddr, uint32_t rd)
 {
 
     int do_translate = 0;
@@ -950,9 +992,9 @@ int mem_addr_translate(cpu_core_t *cpu, uint32_t vaddr, uint32_t *paddr, uint32_
     uint32_t l1_pte_paddr = 0;
     permit_bit_t page_permit;
 
-    if ((cpu->MODE == M_MODE) && (cpu->CSR[IDX_CSR_MSTATUS] & SR_MPRV) && (cpu->CSR[IDX_CSR_SATP] >> 31))
+    if (likely((cpu->MODE < M_MODE) && (cpu->CSR[IDX_CSR_SATP] >> 31)))
         do_translate = 1;
-    if ((cpu->MODE < M_MODE) && (cpu->CSR[IDX_CSR_SATP] >> 31))
+    else if ((cpu->MODE == M_MODE) && (cpu->CSR[IDX_CSR_MSTATUS] & SR_MPRV) && (cpu->CSR[IDX_CSR_SATP] >> 31))
         do_translate = 1;
 
     if (!do_translate)
@@ -962,39 +1004,39 @@ int mem_addr_translate(cpu_core_t *cpu, uint32_t vaddr, uint32_t *paddr, uint32_
     }
 
 #if ENABLE_TLB
-    int supperpage = 0;
+    // int supperpage = 0;
 
-    if ((vaddr & (~0xFFF)) == (cpu->last_access_vaddr & (~0xFFF)))
+    if ((vaddr >> 12) == (cpu->last_access_vpn))
     {
-        *paddr = cpu->last_access_paddr | (vaddr & 0xFFF);
+        *paddr = (cpu->last_access_ppn << 12) | (vaddr & 0xFFF);
         return EXC_OK;
     }
 
     uint32_t tlb_idx = TLB_ADDR_HASH(vaddr);
     uint16_t asid_idx = TLB_ASID_HASH(cpu->SATP_asid);
-    if (((cpu->tlbs[asid_idx][tlb_idx].vaild) &&
-         ((cpu->tlbs[asid_idx][tlb_idx].vaddr << 12) == (vaddr & (~0xFFF))) &&
+    if (((cpu->tlbs[asid_idx][tlb_idx].valid) &&
+         ((cpu->tlbs[asid_idx][tlb_idx].vpn) == (vaddr >> 12)) &&
          (cpu->tlbs[asid_idx][tlb_idx].asid == cpu->SATP_asid)))
     {
         page_permit = cpu->tlbs[asid_idx][tlb_idx].permit;
         // clang-format off
-        if((rd & READ ) && !page_permit.R) {cpu->tlbs[asid_idx][tlb_idx].vaild = 0;goto tr_fin;}
-        if((rd & EXEC ) && !page_permit.X) {cpu->tlbs[asid_idx][tlb_idx].vaild = 0;goto tr_fin;}
-        if((rd & WRITE) && !page_permit.W) {cpu->tlbs[asid_idx][tlb_idx].vaild = 0;goto tr_fin;}
-        if((cpu->MODE == U_MODE) && !page_permit.U) {cpu->tlbs[asid_idx][tlb_idx].vaild = 0; goto tr_fin;}
+        if((rd & READ ) && !page_permit.R) {cpu->tlbs[asid_idx][tlb_idx].valid = 0;goto tr_fin;}
+        else if((rd & EXEC ) && !page_permit.X) {cpu->tlbs[asid_idx][tlb_idx].valid = 0;goto tr_fin;}
+        else if((rd & WRITE) && !page_permit.W) {cpu->tlbs[asid_idx][tlb_idx].valid = 0;goto tr_fin;}
+        if((cpu->MODE == U_MODE) && !page_permit.U) {cpu->tlbs[asid_idx][tlb_idx].valid = 0; goto tr_fin;}
         // clang-format on
 
 #if COLLECT_PERF_STATUS
         cpu->tlb_hit++;
 #endif
-        *paddr = cpu->tlbs[asid_idx][tlb_idx].paddr | (vaddr & 0xFFF);
+        *paddr = (cpu->tlbs[asid_idx][tlb_idx].ppn << 12) | (vaddr & 0xFFF);
         translate_sucess = 1;
-        cpu->last_access_vaddr = vaddr & (~0xFFF);
-        cpu->last_access_paddr = *paddr & (~0xFFF);
-        if (rd & (READ | EXEC))
-            cpu->tlbs[asid_idx][tlb_idx].pte->A = 1;
-        if (rd & (WRITE))
-            cpu->tlbs[asid_idx][tlb_idx].pte->D = 1;
+        cpu->last_access_vpn = vaddr >> 12;
+        cpu->last_access_ppn = *paddr >> 12;
+        // if (rd & (READ | EXEC))
+        //     cpu->tlbs[asid_idx][tlb_idx].pte->A = 1;
+        // if (rd & (WRITE))
+        //     cpu->tlbs[asid_idx][tlb_idx].pte->D = 1;
         return EXC_OK;
     }
     else
@@ -1035,7 +1077,7 @@ int mem_addr_translate(cpu_core_t *cpu, uint32_t vaddr, uint32_t *paddr, uint32_
 
                 *paddr = (l1_pte.PPN_1 << 22) | (vpn_0 << 12) | offset;
                 translate_sucess = 1;
-                supperpage = 1;
+                // supperpage = 1;
                 if (rd & (READ | EXEC))
                     l1_pte.A = 1;
                 if (rd & (WRITE))
@@ -1078,24 +1120,24 @@ tr_fin:
     if (translate_sucess)
     {
 #if ENABLE_TLB
-        cpu->tlbs[asid_idx][tlb_idx].vaddr = vaddr >> 12;
-        cpu->tlbs[asid_idx][tlb_idx].paddr = *paddr & (~0xFFF);
+        cpu->tlbs[asid_idx][tlb_idx].vpn = vaddr >> 12;
+        cpu->tlbs[asid_idx][tlb_idx].ppn = *paddr >> 12;
         cpu->tlbs[asid_idx][tlb_idx].asid = cpu->SATP_asid;
-        cpu->tlbs[asid_idx][tlb_idx].vaild = 1;
+        cpu->tlbs[asid_idx][tlb_idx].valid = 1;
         cpu->tlbs[asid_idx][tlb_idx].permit = page_permit;
-        if (supperpage)
-            cpu->tlbs[asid_idx][tlb_idx].pte = ((pte_t *)(&main_mem[l1_pte_paddr - MEM_BASE]));
-        else
-            cpu->tlbs[asid_idx][tlb_idx].pte = ((pte_t *)(&main_mem[l2_pte_paddr - MEM_BASE]));
+        // if (supperpage)
+        //     cpu->tlbs[asid_idx][tlb_idx].pte = ((pte_t *)(&main_mem[l1_pte_paddr - MEM_BASE]));
+        // else
+        //     cpu->tlbs[asid_idx][tlb_idx].pte = ((pte_t *)(&main_mem[l2_pte_paddr - MEM_BASE]));
 
-        cpu->last_access_vaddr = vaddr & (~0xFFF);
-        cpu->last_access_paddr = *paddr & (~0xFFF);
+        cpu->last_access_vpn = vaddr >> 12;
+        cpu->last_access_ppn = *paddr >> 12;
 #endif
         return EXC_OK;
     }
 
 #if ENABLE_TLB
-    cpu->last_access_vaddr = 0;
+    cpu->last_access_vpn = 0;
 #endif
     if (rd & READ)
         return EXC_LOAD_PAGE_FAULT;
@@ -1112,9 +1154,9 @@ tr_fin:
 #if AMO_SPIN_LOCK
 volatile atomic_int amo_spin_lock_blk[MEMLK_CHUNK_NR] = {0};
 #else
-atomic_char g_rwlock[MEMLK_CHUNK_NR] = {0};
+volatile atomic_char g_rwlock[MEMLK_CHUNK_NR] = {0};
 
-inline void rw_lock_read_lock(cpu_core_t *cpu, atomic_char *lock)
+inline void rw_lock_read_lock(cpu_core_t *cpu, volatile atomic_char *lock)
 {
     while (1)
     {
@@ -1122,35 +1164,39 @@ inline void rw_lock_read_lock(cpu_core_t *cpu, atomic_char *lock)
         if (expected >= 0 && atomic_compare_exchange_weak(lock, &expected, expected + 1))
             return;
 
-        usleep(rand() % 10000);
+        // usleep(rand() % 7000);
+        // usleep(1000);
 #if COLLECT_PERF_STATUS
         cpu->lock_wait_st++;
 #endif
     }
 }
 
-inline void rw_lock_read_unlock(atomic_char *lock)
+inline void rw_lock_read_unlock(volatile atomic_char *lock)
 {
     atomic_fetch_sub(lock, 1);
 }
 
-inline void rw_lock_write_lock(cpu_core_t *cpu, atomic_char *lock)
+inline void rw_lock_write_lock(cpu_core_t *cpu, volatile atomic_char *lock)
 {
     while (1)
     {
         char expected = 0;
         if (atomic_compare_exchange_weak(lock, &expected, -1))
             return;
-        usleep(rand() % 10000);
+        // usleep(rand() % 7000);
+        // usleep(1000);
 #if COLLECT_PERF_STATUS
         cpu->lock_wait_amo_st++;
 #endif
     }
 }
 
-inline void rw_lock_write_unlock(atomic_char *lock)
+inline void rw_lock_write_unlock(volatile atomic_char *lock)
 {
-    atomic_store(lock, 0);
+    char expected = -1;
+    atomic_compare_exchange_weak(lock, &expected, 0);
+    // atomic_store(lock, 0);
 }
 
 #endif
@@ -1199,7 +1245,10 @@ int mem_access(cpu_core_t *cpu, uint32_t addr, uint32_t len, void *dat, uint32_t
         {
             res = mem_access_dispatch(cpu, misalign_addr[i], 1, &u8_dat[i], rd);
             if (unlikely(res != EXC_OK))
+            {
+                addr -= (len - i);
                 goto access_fail;
+            }
         }
     }
     else
@@ -1215,10 +1264,19 @@ int mem_access(cpu_core_t *cpu, uint32_t addr, uint32_t len, void *dat, uint32_t
 
     if (rd & WRITE)
     {
+        while (atomic_flag_test_and_set_explicit(&LR_lock, __ATOMIC_ACQUIRE))
+            ;
         for (int i = 0; i < NR_CPU; i++)
             if (load_resv_addr[i] == (addr >> 2))
+            {
                 load_resv_addr[i] = 0xFFFFFFFF;
+            }
+        atomic_flag_clear_explicit(&LR_lock, __ATOMIC_RELEASE);
     }
+
+    cpu->dcache[DCACHE_HASH(addr)].val = ((uint32_t *)dat)[0];
+    cpu->dcache[DCACHE_HASH(addr)].vaddr = addr;
+    cpu->dcache[DCACHE_HASH(addr)].valid = 1;
 
     return res;
 
@@ -1233,21 +1291,53 @@ translate_fail:
     return res;
 }
 
-int mem_inst_fetch(cpu_core_t *cpu, uint32_t addr, uint32_t len, void *dat)
+static inline int mem_inst_fetch(cpu_core_t *cpu, uint32_t addr, uint32_t len, void *dat)
 {
+
     uint32_t paddr = 0;
     int res = EXC_OK;
     res = mem_addr_translate(cpu, addr, &paddr, EXEC);
     if (unlikely(res != EXC_OK))
     {
+        cpu->icache[ICACHE_HASH(addr)].valid = 0;
         trap(cpu, 0, res, cpu->PC, cpu->PC);
         return res;
     }
+
+#if ICACHE
+    if (cpu->icache[ICACHE_HASH(addr)].valid)
+    {
+        if (addr == cpu->icache[ICACHE_HASH(addr)].vaddr)
+        {
+            if (len == 4)
+                ((uint32_t *)dat)[0] = cpu->icache[ICACHE_HASH(addr)].val;
+            else
+                ((uint16_t *)dat)[0] = cpu->icache[ICACHE_HASH(addr)].val;
+
+#if COLLECT_PERF_STATUS
+            cpu->icache_hit++;
+#endif
+            return EXC_OK;
+        }
+    }
+#endif
+#if COLLECT_PERF_STATUS
+    cpu->icache_miss++;
+#endif
+
     res = mem_access_dispatch(cpu, paddr, len, dat, READ);
     if (unlikely(res != EXC_OK))
     {
         trap(cpu, 0, EXC_INST_ACCESS, cpu->PC, cpu->PC);
+        return res;
     }
+
+#if ICACHE
+    cpu->icache[ICACHE_HASH(addr)].val = ((uint32_t *)dat)[0];
+    cpu->icache[ICACHE_HASH(addr)].vaddr = addr;
+    cpu->icache[ICACHE_HASH(addr)].valid = 1;
+#endif
+
     return res;
 }
 
@@ -1425,6 +1515,7 @@ int csr_access(cpu_core_t *cpu, uint32_t addr, void *dat, uint32_t rd)
         else
         {
             cpu->CSR[IDX_CSR_SATP] = *((uint32_t *)dat);
+            // memset(cpu->icache, 0, sizeof(cpu->icache));
             cpu->SATP_asid = (*((uint32_t *)dat) >> 22) & 0x1FF;
         }
         break;
@@ -1854,37 +1945,42 @@ void core_step(cpu_core_t *cpu)
 
                     adr = cpu->REGS[cpu->cont.rs1] + cpu->cont.imm;
 
+#if MULTI_THREAD
+#if !AMO_SPIN_LOCK
+                    rw_lock_read_lock(cpu, &g_rwlock[adr / MEMLK_CHUNK_SZ]);
+#endif
+#endif
                     switch (cpu->cont.funct3)
                     {
                     case 0x0: // lb
                         res = mem_access(cpu, adr, 1, &buf, READ);
                         if (res != EXC_OK)
-                            continue;
+                            goto load_fin;
                         cpu->REGS[cpu->cont.rd] = (buf & 0x80) ? (buf | 0xFFFFFF00) : buf;
                         break;
                     case 0x1: // lh
                         res = mem_access(cpu, adr, 2, &buf, READ);
                         if (res != EXC_OK)
-                            continue;
+                            goto load_fin;
                         cpu->REGS[cpu->cont.rd] = (buf & 0x8000) ? (buf | 0xFFFF0000) : buf;
                         break;
                     case 0x2: // lw
                         res = mem_access(cpu, adr, 4, &buf, READ);
                         if (res != EXC_OK)
-                            continue;
+                            goto load_fin;
                         cpu->REGS[cpu->cont.rd] = buf;
                         break;
                     case 0x4: // lbu
                         adr = cpu->REGS[cpu->cont.rs1] + cpu->cont.imm;
                         res = mem_access(cpu, adr, 1, &buf, READ);
                         if (res != EXC_OK)
-                            continue;
+                            goto load_fin;
                         cpu->REGS[cpu->cont.rd] = buf;
                         break;
                     case 0x5: // lhu
                         res = mem_access(cpu, adr, 2, &buf, READ);
                         if (res != EXC_OK)
-                            continue;
+                            goto load_fin;
                         cpu->REGS[cpu->cont.rd] = buf;
                         break;
 
@@ -1892,6 +1988,13 @@ void core_step(cpu_core_t *cpu)
                         UND_INS
                         break;
                     }
+
+                load_fin:
+#if MULTI_THREAD
+#if !AMO_SPIN_LOCK
+                    rw_lock_read_unlock(&g_rwlock[adr / MEMLK_CHUNK_SZ]);
+#endif
+#endif
 
                     break;
                 }
@@ -1905,10 +2008,13 @@ void core_step(cpu_core_t *cpu)
 
 #if MULTI_THREAD
 #if AMO_SPIN_LOCK
-                    while (atomic_flag_test_and_set_explicit(&amo_spin_lock_blk[adr / MEMLK_CHUNK_SZ], __ATOMIC_ACQUIRE))
+                    if (atomic_flag_test_and_set_explicit(&amo_spin_lock_blk[adr / MEMLK_CHUNK_SZ], __ATOMIC_ACQUIRE))
                     {
-                        usleep(rand() % 10000);
                         cpu->lock_wait_st++;
+                        while (atomic_flag_test_and_set_explicit(&amo_spin_lock_blk[adr / MEMLK_CHUNK_SZ], __ATOMIC_ACQUIRE))
+                        {
+                            usleep(rand() % 7000);
+                        }
                     }
 #else
                     rw_lock_read_lock(cpu, &g_rwlock[adr / MEMLK_CHUNK_SZ]);
@@ -2038,7 +2144,7 @@ void core_step(cpu_core_t *cpu)
                             COPY_MIx_TO_SIx(E);
                             COPY_MIx_TO_SIx(P);
 
-                            load_resv_addr[cpu->id] = -1UL;
+                            load_resv_addr[cpu->id] = 0xFFFFFFFF;
 
                             cpu->PC = cpu->CSR[IDX_CSR_MEPC];
                             cpu->CSR[IDX_CSR_MSTATUS] &= ~SR_MIE;
@@ -2098,25 +2204,36 @@ void core_step(cpu_core_t *cpu)
 #if ENABLE_TLB
                                 uint32_t asid = cpu->REGS[cpu->cont.rs2];
                                 uint32_t vaddr = cpu->REGS[cpu->cont.rs1];
-                                cpu->last_access_vaddr = 0;
+                                cpu->last_access_vpn = 0;
                                 if (asid & vaddr)
                                 {
-                                    cpu->tlbs[TLB_ASID_HASH(asid)][TLB_ADDR_HASH(vaddr)].vaild = 0;
+                                    cpu->tlbs[TLB_ASID_HASH(asid)][TLB_ADDR_HASH(vaddr)].valid = 0;
+                                    cpu->icache[ICACHE_HASH(vaddr)].valid = 0;
+                                    cpu->dcache[DCACHE_HASH(vaddr)].valid = 0;
                                 }
                                 else if (asid)
                                 {
                                     // printf("sfence asid:%d\n",asid);
                                     for (int i = 0; i < TLB_ADDR_ITEMS; i++)
-                                        cpu->tlbs[TLB_ASID_HASH(asid)][i].vaild = 0;
+                                    {
+                                        cpu->tlbs[TLB_ASID_HASH(asid)][i].valid = 0;
+                                        cpu->icache[ICACHE_HASH(i)].valid = 0;
+                                        cpu->dcache[DCACHE_HASH(i)].valid = 0;
+                                    }
                                 }
                                 else if (vaddr)
                                 {
+
+                                    cpu->icache[ICACHE_HASH(vaddr)].valid = 0;
+                                    cpu->dcache[DCACHE_HASH(vaddr)].valid = 0;
                                     for (int i = 0; i < TLB_ASID_ITEMS; i++)
-                                        cpu->tlbs[i][TLB_ADDR_HASH(vaddr)].vaild = 0;
+                                        cpu->tlbs[i][TLB_ADDR_HASH(vaddr)].valid = 0;
                                 }
                                 else
                                 {
                                     memset(cpu->tlbs, 0, sizeof(cpu->tlbs));
+                                    memset(cpu->icache, 0, sizeof(cpu->icache));
+                                    memset(cpu->dcache, 0, sizeof(cpu->dcache));
                                 }
 #endif
                                 break;
@@ -2191,7 +2308,13 @@ void core_step(cpu_core_t *cpu)
                     break;
                 }
                 case OPCODE_FENCE:
-                    cpu->last_access_vaddr = 0;
+                    S_type_dec(cpu->inst, &cpu->cont);
+                    // if (cpu->cont.funct3 == 1)
+                    {
+                        memset(cpu->icache, 0, sizeof(cpu->icache));
+                        memset(cpu->dcache, 0, sizeof(cpu->dcache));
+                    }
+                    cpu->last_access_vpn = 0;
                     break;
                 case OPCODE_AMO:
                 {
@@ -2205,10 +2328,13 @@ void core_step(cpu_core_t *cpu)
 
 #if (MULTI_THREAD)
 #if AMO_SPIN_LOCK
-                    while (atomic_flag_test_and_set_explicit(&amo_spin_lock_blk[adr / MEMLK_CHUNK_SZ], __ATOMIC_ACQUIRE))
+                    if (atomic_flag_test_and_set_explicit(&amo_spin_lock_blk[adr / MEMLK_CHUNK_SZ], __ATOMIC_ACQUIRE))
                     {
-                        usleep(rand() % 10000);
                         cpu->lock_wait_amo_st++;
+                        while (atomic_flag_test_and_set_explicit(&amo_spin_lock_blk[adr / MEMLK_CHUNK_SZ], __ATOMIC_ACQUIRE))
+                        {
+                            usleep(rand() % 7000);
+                        }
                     }
 #else
                     rw_lock_write_lock(cpu, &g_rwlock[adr / MEMLK_CHUNK_SZ]);
@@ -2219,13 +2345,20 @@ void core_step(cpu_core_t *cpu)
                     switch (funct5)
                     {
                     case 0x02: // lr.w
+                    {
                         res = mem_access(cpu, adr, 4, &cpu->REGS[cpu->cont.rd], READ);
                         if (res != EXC_OK)
                             break;
+                        while (atomic_flag_test_and_set_explicit(&LR_lock, __ATOMIC_ACQUIRE))
+                            ;
                         load_resv_addr[cpu->id] = adr >> 2;
+                        atomic_flag_clear_explicit(&LR_lock, __ATOMIC_RELEASE);
                         break;
+                    }
                     case 0x03: // sc.w
+                    {
                         if ((adr >> 2) == load_resv_addr[cpu->id])
+                        // if ((adr) == load_resv_addr[cpu->id])
                         // if(1)
                         {
                             res = mem_access(cpu, adr, 4, &cpu->REGS[cpu->cont.rs2], WRITE);
@@ -2239,6 +2372,7 @@ void core_step(cpu_core_t *cpu)
                         }
                         load_resv_addr[cpu->id] = 0xFFFFFFFF;
                         break;
+                    }
 
                     case 0x01: // amoswap
                     {
@@ -2841,16 +2975,38 @@ void *cpu_thread(void *threadid)
     while (cpu_core[tid].running)
     {
         core_step(&cpu_core[tid]);
+#if MULTI_THREAD
         if (cpu_core[tid].wfi)
+        {
             usleep(1000);
+        }
         cpu_core[tid].wfi = 0;
-
-        // sched_yield();
-        // update_microsecond_timestamp();
+#endif
     }
     return NULL;
 }
 #endif
+
+#if MULTI_THREAD
+pthread_t threads[NR_CPU];
+#endif
+
+void exit_emu()
+{
+
+#if MULTI_THREAD
+    for (int i = 0; i < NR_CPU; i++)
+        cpu_core[i].running = 0;
+    for (int i = 0; i < NR_CPU; i++)
+        pthread_join(threads[i], NULL);
+#endif
+    vdisk_uninit();
+    free(main_mem);
+    free(framebuffer);
+    debug_dump_regs(&cpu_core[0]);
+    printf("exit.\n");
+    exit(0);
+}
 
 void ctrlc(int sig)
 {
@@ -2881,10 +3037,15 @@ void ctrlc(int sig)
 #if COLLECT_PERF_STATUS
         for (int i = 0; i < NR_CPU; i++)
         {
-            printf("cpu:%d, hit/miss:%lld/%lld,rate: %.2f  ", i,
+            printf("cpu:%d, tlb hit/miss:%lld/%lld,rate: %.2f  \n", i,
                    cpu_core[i].tlb_hit,
                    cpu_core[i].tlb_miss,
                    cpu_core[i].tlb_hit * 100.0 / (cpu_core[i].tlb_hit + cpu_core[i].tlb_miss));
+
+            printf("cpu:%d, icache hit/miss:%lld/%lld,rate: %.2f  \n", i,
+                   cpu_core[i].icache_hit,
+                   cpu_core[i].icache_miss,
+                   cpu_core[i].icache_hit * 100.0 / (cpu_core[i].icache_hit + cpu_core[i].icache_miss));
 
             printf("cpu:%d, mem_st_spinlock_cnt:%lld, mem_amo_st_spinlock_cnt:%lld  ", i,
                    cpu_core[i].lock_wait_st, cpu_core[i].lock_wait_amo_st);
@@ -2908,7 +3069,7 @@ void ctrlc(int sig)
         break;
     case 'q':
     case 'Q':
-        exit(0);
+        exit_emu();
     default:
         uart_send_char(gc);
         break;
@@ -3000,8 +3161,6 @@ int main(int argc, char *argv[])
 
     usec_time_start = now_microsecond_timestamp();
 #if MULTI_THREAD
-
-    pthread_t threads[NR_CPU];
     for (uptr_t i = 0; i < NR_CPU; i++)
     {
         pthread_create(&threads[i], NULL, cpu_thread, (ptr_t)i);
@@ -3106,21 +3265,30 @@ int main(int argc, char *argv[])
             SDL_RenderCopy(renderer, texture, NULL, NULL);
             SDL_RenderPresent(renderer);
 
+            if (uart_out_buf)
+            {
+                if (!(extirq_slot[IRQ_NUM_UART].pending))
+                {
+                    uart_out_buf = 0;
+                    if (UART8250_IER & UART_IER_THRI)
+                    {
+                        UART8250_IIR |= UART_IIR_THRI;
+                        UART8250_IIR &= ~UART_IIR_NO_INT;
+                        extirq_slot[IRQ_NUM_UART].pending = 1;
+                    }
+                }
+            }
+
             // plic_check_interrupt();
+            // for (int i = 0; i < NR_CPU; i++)
+            //     plic_check_interrupt(i);
+
+#if !MULTI_THREAD
         }
+#else
+        }
+#endif
     }
 fin:
-
-#if MULTI_THREAD
-    for (int i = 0; i < NR_CPU; i++)
-        cpu_core[i].running = 0;
-    for (int i = 0; i < NR_CPU; i++)
-        pthread_join(threads[i], NULL);
-#endif
-    vdisk_uninit();
-    free(main_mem);
-    free(framebuffer);
-    debug_dump_regs(&cpu_core[0]);
-    printf("exit.\n");
-    return cpu_core[0].REGS[10];
+    exit_emu();
 }
